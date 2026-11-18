@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+.env.local
+.DS_Store
+.npm-cache/
+.npm-logs/
+shots/
+mori-shots.mjs
+mori-debug.mjs
+mori-tests.mjs
+*.log
