@@ -4,6 +4,8 @@
 >
 > This prototype tests one complete loop: **focus → grow → feel something → return.** AI replies and payment are mocked behind real interfaces, so both can be replaced without rebuilding the product.
 
+**Live demo:** https://moricompanion.netlify.app/
+
 ![MORI welcome screen](docs/welcome.png)
 
 ## What is in the prototype
@@ -29,7 +31,9 @@
 
 ## Run it locally
 
-Requirements: **Node.js 18+** and npm.
+The fastest way to see MORI is the live demo: **https://moricompanion.netlify.app/** — it runs entirely in the browser, so no install is required.
+
+To run it locally, you need **Node.js 18+** and npm:
 
 ```bash
 npm install
