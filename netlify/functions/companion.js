@@ -255,10 +255,14 @@ async function handle(request) {
     clearTimeout(timeout);
   }
 
-  console.warn('[MORI ai] gemini request failed', lastError);
+  // Visible in Netlify → Functions → companion logs during a live demo.
+  console.warn(
+    '[MORI ai] gemini request failed',
+    JSON.stringify({ ...lastError, elapsed_ms: Date.now() - startedAt, budget_ms: BUDGET_MS }),
+  );
   // 4xx means the client should not retry; everything else maps to 502 so the
   // UI quietly falls back to mock replies instead of showing an error.
-  const timedOut = lastError?.message === 'Gemini timed out.';
+  const timedOut = /^Gemini timed out/.test(lastError?.message || '');
   const clientStatus = lastError?.status >= 400 && lastError.status < 500 && !timedOut ? lastError.status : 502;
   return { status: clientStatus, body: {
     error: lastError?.message || 'Gemini request failed.',
