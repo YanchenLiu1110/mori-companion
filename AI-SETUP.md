@@ -24,8 +24,8 @@ Google Gemini
 
 > ⚠️ 注意
 > - **不要**把 Key 发到群里、提交到 GitHub、写进 `src/` 里的任何文件。
-> - 免费额度：以 <https://ai.google.dev/gemini-api/docs/rate-limits> 页面的 Gemini 3.8 Flash 行为准，演示完全够用。
-> - 注意：`gemini-2.5-flash` 已对新建 API 项目关闭，本项目用的是 `gemini-3.8-flash`。
+> - 免费层按**模型**分别计算额度，且 3.8 Flash 曾出现 5 次/分钟的限制。本项目默认从最快的 **`gemini-3.5-flash-lite`** 开始，失败自动换下一个模型（3.5 / 3.6 / 2.5 系列），单一模型繁忙或限流不影响演示。
+> - 线上实测：每次回复约 8–11 秒（含网络），页面上可看到 `Gemini · live` 与 `Boba · via gemini-3.5-flash-lite`。
 > - 如果有多个 Key，可以后面用 `GEMINI_API_KEYS` 配主备轮换。
 
 ---
@@ -121,7 +121,8 @@ fetch('/.netlify/functions/companion', { method: 'POST', headers: { 'Content-Typ
 | 主备 Key 轮换 | 再加一个变量 `GEMINI_API_KEYS`，值用英文逗号分隔：`AIza...1,AIza...2`。主 Key 遇到 429/403 会自动切到下一个 |
 | 换模型 | 加变量 `GEMINI_MODEL`，比如 `gemini-3.6-flash` 或 `gemini-3.5-flash-lite` |
 | 主模型过载时换备用模型 | 加变量 `GEMINI_FALLBACK_MODELS`，例如 `gemini-3.6-flash,gemini-3.5-flash-lite`（默认不启用） |
-| 调整单次请求预算 | 加变量 `GEMINI_TIMEOUT_MS`，默认 22000 毫秒，必须小于 Netlify 网关约 30 秒上限 |
+| 调整单次请求预算 | 加变量 `GEMINI_TIMEOUT_MS`，默认 24000 毫秒；`GEMINI_PER_MODEL_MS` 默认 11000 毫秒（单个模型等待上限） |
+| 指定模型顺序 | `GEMINI_MODEL=gemini-3.5-flash`，后续模型用 `GEMINI_FALLBACK_MODELS=a,b,c` |
 | 调整思考强度 | 加变量 `GEMINI_THINKING_LEVEL`：`low`（默认，最快）/ `medium` / `high` |
 | 本地开发调试 | `npx netlify-cli dev`（需要先 `npx netlify-cli login` 和 `npx netlify-cli link`），本地也能跑函数 |
 | 调整角色人格 | 改 `src/lib/companionAI.js` 里的 `buildSystemPrompt()`（Gemini 3.x 已弃用 temperature，语气靠 system prompt 控制） |

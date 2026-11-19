@@ -17,8 +17,9 @@ const FUNCTION_ENDPOINT = '/.netlify/functions/companion';
 const ENDPOINT = (import.meta.env.VITE_MORI_LLM_ENDPOINT || '').trim() || FUNCTION_ENDPOINT;
 const REQUEST_TIMEOUT_MS = 50_000; // proxy may retry + fall back before answering
 
+/** Gemini is served by a model chain (see netlify/functions/companion.js). */
 export const AI_ENGINE = {
-  model: 'Gemini 3.8 Flash',
+  model: 'Gemini',
   label: 'Gemini',
 };
 

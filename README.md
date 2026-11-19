@@ -75,7 +75,7 @@ The companion page combines the full character stage, a data-driven growth timel
 
 ## Companion AI — Gemini via Netlify Functions
 
-Chat is powered by **Gemini 3.8 Flash** through a serverless proxy:
+Chat is powered by **Google Gemini** (Google AI Studio key) through a serverless proxy. Several Flash / Flash-Lite models are tried in order, so one busy or rate-limited model does not take chat down:
 
 ```text
 Browser (chat UI)
@@ -105,10 +105,11 @@ Optional server variables:
 | --- | --- |
 | `GEMINI_API_KEY` | Primary key (required). |
 | `GEMINI_API_KEYS` | Comma-separated extra keys, rotated automatically on 429/403. |
-| `GEMINI_MODEL` | Override the model (default `gemini-3.8-flash`). |
+| `GEMINI_MODEL` | Override the primary model (default `gemini-3.5-flash-lite` — fastest on free tier). |
 | `GEMINI_THINKING_LEVEL` | `low` / `medium` / `high`. Default `low` keeps chat snappy and cheap. |
-| `GEMINI_FALLBACK_MODELS` | Optional comma-separated fallbacks tried when the primary is overloaded (empty by default). |
-| `GEMINI_TIMEOUT_MS` | Upstream budget per request, default `22000` (must stay below Netlify's ~30 s limit). |
+| `GEMINI_FALLBACK_MODELS` | Comma-separated model chain after the primary (default `gemini-2.5-flash-lite,gemini-3.5-flash,gemini-3.6-flash,gemini-2.5-flash`). |
+| `GEMINI_TIMEOUT_MS` | Overall budget per request, default `24000` (must stay below Netlify's ~30 s limit). |
+| `GEMINI_PER_MODEL_MS` | Max time one model may take before the chain moves on, default `11000`. |
 
 ### Local development
 

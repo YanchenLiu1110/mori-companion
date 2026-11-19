@@ -499,7 +499,7 @@ function ChatCard({
         </form>
         <p className="mt-2 text-center text-[0.52rem] font-bold text-forest-800/25">
           {aiState === AI_CONFIGURED
-            ? `Personalized with your study data · powered by ${AI_ENGINE.model}`
+            ? 'Personalized with your study data · powered by Gemini'
             : 'Preview replies · Gemini AI activates once the API key is configured'}
         </p>
       </div>
