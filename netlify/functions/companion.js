@@ -20,6 +20,7 @@
  * answers 200 { configured: false } and the client falls back to mock replies.
  */
 
+const FN_VERSION = '2026-11-19T11:45';
 const DEFAULT_MODEL = 'gemini-3.8-flash';
 const DEFAULT_FALLBACKS = '';
 const DEFAULT_THINKING_LEVEL = process.env.GEMINI_THINKING_LEVEL || 'low';
@@ -216,7 +217,7 @@ async function handle(request) {
   const keys = getKeys();
   if (!keys.length) {
     // 200 (not an error) so the browser console stays clean before the key is set.
-    return { status: 200, body: { configured: false, reply: null } };
+    return { status: 200, body: { configured: false, reply: null, fn_version: FN_VERSION } };
   }
 
   if (isRateLimited()) {
@@ -263,6 +264,7 @@ async function handle(request) {
               return {
                 status: 200,
                 body: {
+                  fn_version: FN_VERSION,
                   reply,
                   model,
                   provider: 'gemini',
@@ -307,6 +309,7 @@ async function handle(request) {
   const timedOut = /^Gemini timed out/.test(lastError?.message || '');
   const clientStatus = lastError?.status >= 400 && lastError.status < 500 && !timedOut ? lastError.status : 502;
   return { status: clientStatus, body: {
+    fn_version: FN_VERSION,
     error: lastError?.message || 'Gemini request failed.',
     model: lastError?.model || primaryModel(),
     retryable: clientStatus === 502 || clientStatus === 429,
