@@ -20,7 +20,7 @@
  * answers 200 { configured: false } and the client falls back to mock replies.
  */
 
-const FN_VERSION = '2026-11-19T11:45';
+const FN_VERSION = '2026-11-19T11:57';
 const DEFAULT_MODEL = 'gemini-3.8-flash';
 const DEFAULT_FALLBACKS = '';
 const DEFAULT_THINKING_LEVEL = process.env.GEMINI_THINKING_LEVEL || 'low';
@@ -243,7 +243,9 @@ async function handle(request) {
   }
 
   // Stay well under Netlify's ~30s gateway timeout, and keep replies snappy.
-  const BUDGET_MS = Number(process.env.GEMINI_TIMEOUT_MS || 16_000);
+  // Cold calls to Gemini 3.8 can take 15-25s from some regions. Observe it rather
+  // than abort: Netlify's ~30s gateway limit still applies (see GEMINI_TIMEOUT_MS).
+  const BUDGET_MS = Number(process.env.GEMINI_TIMEOUT_MS || 26_000);
   const startedAt = Date.now();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), BUDGET_MS);
