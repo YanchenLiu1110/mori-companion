@@ -20,9 +20,17 @@
  * answers 200 { configured: false } and the client falls back to mock replies.
  */
 
-const FN_VERSION = '2026-11-19T11:57';
-const DEFAULT_MODEL = 'gemini-3.8-flash';
-const DEFAULT_FALLBACKS = '';
+const FN_VERSION = '2026-11-19T21:15';
+// Fast, capable default. Free tier limits are per model, so the chain below is
+// what keeps chat working when one model is busy or out of quota.
+const DEFAULT_MODEL = 'gemini-3.5-flash';
+const DEFAULT_FALLBACKS = [
+  'gemini-3.6-flash',
+  'gemini-3.8-flash',
+  'gemini-3.5-flash-lite',
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+].join(',');
 const DEFAULT_THINKING_LEVEL = process.env.GEMINI_THINKING_LEVEL || 'low';
 const OVERLOAD_PATTERN = /high demand|overloaded|unavailable|temporarily|try again later|resource_exhausted|no longer available/i;
 const RATE_LIMIT_PATTERN = /rate limit|quota|per day|per minute|retry in|exceeded/i;
@@ -121,7 +129,7 @@ function getKeys() {
 
 // Small in-memory throttle; Netlify may recycle instances, it is a safety net only.
 const WINDOW_MS = 60_000;
-const MAX_PER_WINDOW = 30;
+const MAX_PER_WINDOW = 60;
 let windowStart = 0;
 let windowCount = 0;
 
@@ -160,6 +168,36 @@ function modelChain() {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Per-instance memory of model health. Google's "high demand" and quota errors
+ * are per model, so remembering a failure lets the next request start with a
+ * model that actually works.
+ */
+const DOWN_MS = 60_000;
+const modelHealth = new Map(); // model -> { until, reason, hits }
+
+function markModel(model, reason, ttl = DOWN_MS) {
+  modelHealth.set(model, { until: Date.now() + ttl, reason, hits: (modelHealth.get(model)?.hits || 0) + 1 });
+}
+
+function markModelHealthy(model) {
+  modelHealth.delete(model);
+}
+
+function isModelDown(model) {
+  const health = modelHealth.get(model);
+  return Boolean(health && health.until > Date.now());
+}
+
+/** Least-recently-failing first: healthy models, then others, with the primary at the front when healthy. */
+function orderByHealth(chain) {
+  const healthy = chain.filter((model) => !isModelDown(model));
+  const down = chain
+    .filter((model) => isModelDown(model))
+    .sort((a, b) => (modelHealth.get(a)?.until || 0) - (modelHealth.get(b)?.until || 0));
+  return [...healthy, ...down];
+}
+
 // Latency probe cache (per warm instance). A GET on the interactions API needs no
 // quota and is rejected/answered quickly, so it measures reachability + RTT.
 let preflight = null;
@@ -192,7 +230,11 @@ function orderModelsForLatency(chain) {
   if (preflight === null || preflight < 1_500) return chain;
   // Slow upstream: try the fastest models first as a rescue, then the normal chain.
   const light = ['gemini-3.5-flash-lite', 'gemini-2.5-flash-lite'];
-  return [...light.filter((model) => !chain.includes(model)), ...chain];
+  return [
+    ...chain.filter((model) => light.includes(model)),
+    ...light.filter((model) => !chain.includes(model)),
+    ...chain.filter((model) => !light.includes(model)),
+  ];
 }
 
 async function callGemini({ key, model, payload, signal }) {
@@ -249,21 +291,24 @@ async function handle(request) {
   const startedAt = Date.now();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), BUDGET_MS);
+  const deadline = Date.now() + BUDGET_MS;
   let lastError = null;
   let sawQuotaError = false;
 
   try {
     // If we know the upstream is slow for this deployment, start with a lighter model.
     preflight = await probeUpstreamLatency(keys[0]);
-    const ordered = orderModelsForLatency(modelChain());
-    for (const key of keys) {
+    const ordered = orderModelsForLatency(orderByHealth(modelChain()));
+    outer: for (const key of keys) {
       for (const model of ordered) {
+        if (Date.now() >= deadline) break outer;
         const { payload } = buildInteractionRequest(body, model);
         // Rate limits are not transient: a retry just burns the window.
         const rateLimited = lastError ? isRateLimitedError(lastError.status, lastError.message) : false;
         const attempts = rateLimited ? [0] : [0, 500]; // usually one try + one short retry
         for (const delay of attempts) {
           if (delay) await sleep(delay + Math.random() * 250);
+          if (Date.now() >= deadline) break outer;
           let result;
           try {
             result = await callGemini({ key, model, payload, signal: controller.signal });
@@ -278,6 +323,7 @@ async function handle(request) {
           if (result.ok) {
             const reply = extractReply(result.data);
             if (reply) {
+              markModelHealthy(model);
               return {
                 status: 200,
                 body: {
@@ -297,11 +343,18 @@ async function handle(request) {
           if (result.status === 429 || /resource_exhausted|quota/i.test(result.message)) sawQuotaError = true;
 
           // Only overload / availability errors are worth retrying.
-          const limited = isRateLimitedError(result.status, result.message);
-          if (limited) break; // move straight to the next model / key
-          if (!(result.status >= 500) || !OVERLOAD_PATTERN.test(result.message)) break;
+          if (isRateLimitedError(result.status, result.message)) {
+            markModel(model, 'quota', 10 * 60_000);
+            break; // quota is per model: try the next one immediately
+          }
+          if (OVERLOAD_PATTERN.test(result.message) && delay !== attempts[attempts.length - 1]) continue; // busy: one quick retry
+          if (result.status >= 500 && !OVERLOAD_PATTERN.test(result.message)) continue; // server error: one quick retry
+          break;
         }
 
+        if (OVERLOAD_PATTERN.test(lastError?.message || '') && lastError?.status >= 500) {
+          markModel(model, 'busy');
+        }
         const authFailure = [401, 403].includes(lastError?.status) && !/quota|demand|overloaded|rate limit/i.test(lastError?.message || '');
         if (authFailure) break; // bad key: moving to the next model with the same key is pointless
         const stillRateLimited = isRateLimitedError(lastError?.status, lastError?.message);
@@ -309,8 +362,8 @@ async function handle(request) {
       }
       // Another key only helps for quota errors, and only if time remains.
       const limited = isRateLimitedError(lastError?.status, lastError?.message);
-      if (!limited || (keys.length === 1 && !process.env.GEMINI_FALLBACK_MODELS)) break;
-      if (Date.now() - startedAt > BUDGET_MS * 0.7) break;
+      if (!limited) break;
+      if (Date.now() >= deadline) break;
     }
   } finally {
     clearTimeout(timeout);

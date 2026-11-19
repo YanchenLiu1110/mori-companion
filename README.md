@@ -125,7 +125,7 @@ Without a key locally, chat simply uses mock replies — everything else works.
 
 ```bash
 npm install playwright-core --no-save   # only needed for the browser test
-npm run test:ai    # 30 proxy checks against a mocked Gemini Interactions endpoint
+npm run test:ai    # 33 proxy checks against a mocked Gemini Interactions endpoint
 npm run test:e2e   # boots mock servers + Chrome, verifies live + fallback paths
 ```
 

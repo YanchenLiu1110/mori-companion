@@ -39,8 +39,11 @@ globalThis.fetch = async (url, options = {}) => {
   return realFetch(url, options);
 };
 
-const moduleUrl = new URL(`../netlify/functions/companion.js?v=${Date.now()}`, import.meta.url);
-let { default: handler } = await import(moduleUrl.href);
+async function freshHandler() {
+  // Each module instance has its own model-health memory.
+  ({ default: handler } = await import(new URL(`../netlify/functions/companion.js?v=${Date.now()}-${Math.random()}`, import.meta.url).href));
+}
+let { default: handler } = await import(new URL(`../netlify/functions/companion.js?v=${Date.now()}`, import.meta.url).href);
 
 function makeRequest(body, method = 'POST') {
   return new Request('https://example.netlify.app/.netlify/functions/companion', {
@@ -106,7 +109,7 @@ mockGeminiHandler = () => ok(REPLY);
 check('Valid key → Gemini reply', status === 200 && data.reply === REPLY, `status ${status}`);
 const sentCall = GEMINI_CALLS.at(-1);
 check('Uses Interactions API endpoint', sentCall?.url === GEMINI_INTERACTIONS, sentCall?.url);
-check('Model defaults to gemini-3.8-flash', sentCall?.body?.model === 'gemini-3.8-flash', sentCall?.body?.model);
+check('Model defaults to gemini-3.5-flash', sentCall?.body?.model === 'gemini-3.5-flash', sentCall?.body?.model);
 check('System instruction forwarded (snake_case)', sentCall?.body?.system_instruction?.includes('Boba'));
 check('Conversation sent as 3 turns', sentCall?.body?.input?.length === 3, `input ${sentCall?.body?.input?.length}`);
 check('First turn is user_input', sentCall?.body?.input?.[0]?.type === 'user_input');
@@ -137,7 +140,8 @@ await call({
 const trimmed = GEMINI_CALLS.at(-1).body.input;
 check('Trailing model turn removed', trimmed.length === 1 && trimmed[0].type === 'user_input', `${trimmed.length} turns`);
 
-// 5) Daily quota: only one attempt per model (no retry burn), 429 surfaced with hint
+// 5) Daily quota: one attempt per model, then the next key; 429 with retry hint
+await freshHandler();
 process.env.GEMINI_API_KEYS = 'test-key-backup';
 let limitedAttempts = 0;
 let limitedKeys = [];
@@ -148,13 +152,15 @@ mockGeminiHandler = () => {
 };
 ({ status, data } = await call(conversation));
 check('Daily quota → 429 with retry_in hint', status === 429 && /4h10m47s/.test(data.retry_in || ''), `${status} · ${data.retry_in}`);
+const keyAttempts = limitedKeys.filter((key) => key === 'test-key-primary').length;
 check(
-  'Daily quota → one attempt per model, then next key',
-  limitedAttempts === 2 && limitedKeys.join(',') === 'test-key-primary,test-key-backup',
-  `${limitedAttempts} attempts on ${limitedKeys.length} keys`,
+  'Daily quota → every model once, then the backup key',
+  new Set(limitedKeys).size === 2 && keyAttempts === 6 && limitedAttempts === 12,
+  `${limitedAttempts} attempts · ${new Set(limitedKeys).size} keys`,
 );
 
-// 5b) Quota hit on every model → the key rotates before giving up
+// 5b) Single key: quota walks the whole chain once, then stops with 429
+await freshHandler();
 process.env.GEMINI_API_KEYS = '';
 process.env.GEMINI_API_KEY = 'test-key-primary';
 let modelOrder = [];
@@ -163,7 +169,7 @@ mockGeminiHandler = (body) => {
   return { status: 429, body: { error: { code: 429, message: 'Rate limit exceeded for model ' + body.model + ' (limit: 20 requests per day on Free Tier).' } } };
 };
 ({ status } = await call(conversation));
-check('Quota → falls through each model, then stops', status === 429 && modelOrder.length === 1, modelOrder.join(','));
+check('Quota → tries each model once, then stops', status === 429 && modelOrder.length === 6, modelOrder.join(','));
 
 // 6) Invalid key → surfaced
 process.env.GEMINI_API_KEYS = '';
@@ -208,23 +214,30 @@ mockGeminiHandler = () => {
 ({ status, data } = await call(conversation));
 check('Overloaded on first try → auto retry succeeds', status === 200 && data.reply.includes('Second try'), `status ${status}, attempts ${tries}`);
 
-// 11) Rescue: primary overloaded for every attempt → fallback model answers
-process.env.GEMINI_FALLBACK_MODELS = 'gemini-3.6-flash';
+// 11) Rescue: primary overloaded → the next model answers, failing one is remembered
+await freshHandler();
 const modelTries = {};
 mockGeminiHandler = (body) => {
   modelTries[body.model] = (modelTries[body.model] || 0) + 1;
-  if (body.model === 'gemini-3.8-flash') {
-    return { status: 503, body: { error: { code: 503, message: 'gemini-3.8-flash is currently experiencing high demand. Please try again later.' } } };
+  if (body.model === 'gemini-3.5-flash') {
+    return { status: 503, body: { error: { code: 503, message: 'gemini-3.5-flash is currently experiencing high demand. Please try again later.' } } };
   }
   return ok(`Fallback ${body.model} here.`);
 };
 ({ status, data } = await call(conversation));
 check(
-  'Primary fully overloaded → fallback model answers',
+  'Primary overloaded → next model answers',
   status === 200 && data.fallback === true && data.model === 'gemini-3.6-flash',
   `${data.model} · ${JSON.stringify(modelTries)}`,
 );
-delete process.env.GEMINI_FALLBACK_MODELS;
+// Next request on the same warm instance should skip the busy model.
+const triesBefore = modelTries['gemini-3.5-flash'];
+({ status, data } = await call(conversation));
+check(
+  'Busy model is skipped on the next message',
+  status === 200 && data.model === 'gemini-3.6-flash' && modelTries['gemini-3.5-flash'] === triesBefore,
+  `served by ${data.model}`,
+);
 
 // 12) No fan-out on real 400s
 let fanOut = 0;
@@ -236,11 +249,10 @@ mockGeminiHandler = () => {
 check('400 is not retried across models', status === 400 && fanOut === 1, `${fanOut} attempts`);
 
 // 13) Every model down → retryable failure
-process.env.GEMINI_FALLBACK_MODELS = 'gemini-3.6-flash';
+await freshHandler();
 mockGeminiHandler = () => ({ status: 500, body: { error: { code: 500, message: 'Internal error encountered.' } } });
 ({ status, data } = await call(conversation));
 check('All models down → 502 retryable', status === 502 && data.retryable === true, JSON.stringify(data));
-delete process.env.GEMINI_FALLBACK_MODELS;
 
 // 14) Validation
 ({ status } = await call({}, 'GET'));
@@ -263,7 +275,9 @@ check(
 );
 
 // 16) Slow upstream is cut off by the budget so the gateway never times out
+await freshHandler();
 process.env.GEMINI_TIMEOUT_MS = '400';
+globalThis.fetch = realFetch;
 const realFetchSlow = globalThis.fetch;
 const hadProbe = PROBE_STATE.slowProbe;
 PROBE_STATE.slowProbe = false; // made the warm instance look healthy (fast probe)
@@ -280,7 +294,7 @@ globalThis.fetch = async (url, options) => {
   return new Response('{}', { status: 200 });
 };
 const slowStart = Date.now();
-({ status } = await call(conversation));
+({ status, data } = await call(conversation));
 const slowMs = Date.now() - slowStart;
 globalThis.fetch = realFetchSlow;
 PROBE_STATE.slowProbe = hadProbe;
@@ -310,6 +324,7 @@ check(
   order.join(' → '),
 );
 globalThis.fetch = realFetch;
+PROBE_STATE.slowProbe = false;
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
