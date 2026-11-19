@@ -25,6 +25,18 @@ const DEFAULT_MODEL = 'gemini-3.8-flash';
 const DEFAULT_FALLBACKS = '';
 const DEFAULT_THINKING_LEVEL = process.env.GEMINI_THINKING_LEVEL || 'low';
 const OVERLOAD_PATTERN = /high demand|overloaded|unavailable|temporarily|try again later|resource_exhausted|no longer available/i;
+const RATE_LIMIT_PATTERN = /rate limit|quota|per day|per minute|retry in|exceeded/i;
+
+/** Extracts a human "retry in Xh Ym" hint from Gemini's message when present. */
+function retryHint(message = '') {
+  const match = String(message).match(/retry in ([\dhms ]+?)(?:\.|$|\s+or\s)/i);
+  return match ? match[1].trim() : null;
+}
+
+/** True when the error is a quota/rate limit rather than a transient overload. */
+function isRateLimitedError(status, message) {
+  return status === 429 && !OVERLOAD_PATTERN.test(message) || RATE_LIMIT_PATTERN.test(message);
+}
 const INTERACTIONS_URL = 'https://generativelanguage.googleapis.com/v1beta/interactions';
 
 /**
@@ -158,7 +170,7 @@ async function probeUpstreamLatency(key) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 4_000);
   try {
-    await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=1', {
+    await fetch('https://generativelanguage.googleapis.com/v1beta/models', {
       method: 'GET',
       headers: { 'x-goog-api-key': key },
       signal: controller.signal,
@@ -245,7 +257,9 @@ async function handle(request) {
     for (const key of keys) {
       for (const model of ordered) {
         const { payload } = buildInteractionRequest(body, model);
-        const attempts = [0, 500]; // one try + one short back-off retry
+        // Rate limits are not transient: a retry just burns the window.
+        const rateLimited = lastError ? isRateLimitedError(lastError.status, lastError.message) : false;
+        const attempts = rateLimited ? [0] : [0, 500]; // usually one try + one short retry
         for (const delay of attempts) {
           if (delay) await sleep(delay + Math.random() * 250);
           let result;
@@ -281,15 +295,20 @@ async function handle(request) {
           if (result.status === 429 || /resource_exhausted|quota/i.test(result.message)) sawQuotaError = true;
 
           // Only overload / availability errors are worth retrying.
-          if (!(result.status >= 500 || result.status === 429) || !OVERLOAD_PATTERN.test(result.message)) break;
+          const limited = isRateLimitedError(result.status, result.message);
+          if (limited) break; // move straight to the next model / key
+          if (!(result.status >= 500) || !OVERLOAD_PATTERN.test(result.message)) break;
         }
 
-        const authFailure = [401, 403].includes(lastError?.status) && !/quota|demand|overloaded/i.test(lastError?.message || '');
+        const authFailure = [401, 403].includes(lastError?.status) && !/quota|demand|overloaded|rate limit/i.test(lastError?.message || '');
         if (authFailure) break; // bad key: moving to the next model with the same key is pointless
-        if (lastError?.status >= 400 && lastError.status < 500 && lastError.status !== 429) break;
+        const stillRateLimited = isRateLimitedError(lastError?.status, lastError?.message);
+        if (!stillRateLimited && lastError?.status >= 400 && lastError.status < 500) break;
       }
       // Another key only helps for quota errors, and only if time remains.
-      if (!sawQuotaError || Date.now() - startedAt > BUDGET_MS * 0.7) break;
+      const limited = isRateLimitedError(lastError?.status, lastError?.message);
+      if (!limited || (keys.length === 1 && !process.env.GEMINI_FALLBACK_MODELS)) break;
+      if (Date.now() - startedAt > BUDGET_MS * 0.7) break;
     }
   } finally {
     clearTimeout(timeout);
@@ -308,7 +327,12 @@ async function handle(request) {
   // 4xx means the client should not retry; everything else maps to 502 so the
   // UI quietly falls back to mock replies instead of showing an error.
   const timedOut = /^Gemini timed out/.test(lastError?.message || '');
-  const clientStatus = lastError?.status >= 400 && lastError.status < 500 && !timedOut ? lastError.status : 502;
+  const rateLimited = isRateLimitedError(lastError?.status, lastError?.message);
+  const clientStatus = rateLimited
+    ? 429
+    : lastError?.status >= 400 && lastError.status < 500 && !timedOut
+      ? lastError.status
+      : 502;
   return { status: clientStatus, body: {
     fn_version: FN_VERSION,
     elapsed_ms: Date.now() - startedAt,
@@ -316,6 +340,7 @@ async function handle(request) {
     error: lastError?.message || 'Gemini request failed.',
     model: lastError?.model || primaryModel(),
     retryable: clientStatus === 502 || clientStatus === 429,
+    retry_in: rateLimited ? retryHint(lastError?.message) : null,
   } };
 }
 

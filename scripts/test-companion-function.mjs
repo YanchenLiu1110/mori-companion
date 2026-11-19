@@ -137,17 +137,33 @@ await call({
 const trimmed = GEMINI_CALLS.at(-1).body.input;
 check('Trailing model turn removed', trimmed.length === 1 && trimmed[0].type === 'user_input', `${trimmed.length} turns`);
 
-// 5) Quota error rotates to backup key
+// 5) Daily quota: only one attempt per model (no retry burn), 429 surfaced with hint
 process.env.GEMINI_API_KEYS = 'test-key-backup';
-let callCount = 0;
+let limitedAttempts = 0;
+let limitedKeys = [];
 mockGeminiHandler = () => {
-  callCount += 1;
-  return callCount === 1
-    ? { status: 429, body: { error: { code: 429, message: 'Quota exceeded' } } }
-    : ok('Backup key answered, hey Mira.');
+  limitedAttempts += 1;
+  limitedKeys.push(GEMINI_CALLS.at(-1).key);
+  return { status: 429, body: { error: { code: 429, message: 'Rate limit exceeded for model gemini-3.8-flash (limit: 20 requests per day on Free Tier). Please retry in 4h10m47s or upgrade your tier at https://ai.dev/rate-limit.' } } };
 };
 ({ status, data } = await call(conversation));
-check('429 on primary → retries with backup key', status === 200 && data.reply.includes('Backup key'), `status ${status}`);
+check('Daily quota → 429 with retry_in hint', status === 429 && /4h10m47s/.test(data.retry_in || ''), `${status} · ${data.retry_in}`);
+check(
+  'Daily quota → one attempt per model, then next key',
+  limitedAttempts === 2 && limitedKeys.join(',') === 'test-key-primary,test-key-backup',
+  `${limitedAttempts} attempts on ${limitedKeys.length} keys`,
+);
+
+// 5b) Quota hit on every model → the key rotates before giving up
+process.env.GEMINI_API_KEYS = '';
+process.env.GEMINI_API_KEY = 'test-key-primary';
+let modelOrder = [];
+mockGeminiHandler = (body) => {
+  modelOrder.push(body.model);
+  return { status: 429, body: { error: { code: 429, message: 'Rate limit exceeded for model ' + body.model + ' (limit: 20 requests per day on Free Tier).' } } };
+};
+({ status } = await call(conversation));
+check('Quota → falls through each model, then stops', status === 429 && modelOrder.length === 1, modelOrder.join(','));
 
 // 6) Invalid key → surfaced
 process.env.GEMINI_API_KEYS = '';
