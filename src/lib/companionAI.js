@@ -18,7 +18,7 @@ const ENDPOINT = (import.meta.env.VITE_MORI_LLM_ENDPOINT || '').trim() || FUNCTI
 const REQUEST_TIMEOUT_MS = 18_000;
 
 export const AI_ENGINE = {
-  model: 'Gemini 2.5 Flash',
+  model: 'Gemini 3.8 Flash',
   label: 'Gemini',
 };
 

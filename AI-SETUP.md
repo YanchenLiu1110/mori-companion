@@ -1,14 +1,14 @@
 # 手把手：把 Google AI Studio 的 Gemini 接入 MORI
 
 > 你只需要做 **3 件事**：拿 API Key → 在 Netlify 填变量 → 触发部署。
-> 代码我已经全部写好并测试通过（代理服务 14 项 + 浏览器端到端 11 项全部通过）。
+> 代码我已经全部写好并测试通过（代理服务 23 项 + 浏览器端到端 12 项全部通过）。
 
 ```
 浏览器聊天框
    │  POST /.netlify/functions/companion
    ▼
 Netlify Function（密钥只在这里）
-   │  POST generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent
+   │  POST generativelanguage.googleapis.com/v1beta/interactions（Gemini 3.8 Flash）
    ▼
 Google Gemini
 ```
@@ -24,7 +24,8 @@ Google Gemini
 
 > ⚠️ 注意
 > - **不要**把 Key 发到群里、提交到 GitHub、写进 `src/` 里的任何文件。
-> - 免费额度：`gemini-2.5-flash` 大约 10 次/分钟、500 次/天（以 AI Studio 页面显示为准），路演演示完全够用。
+> - 免费额度：以 <https://ai.google.dev/gemini-api/docs/rate-limits> 页面的 Gemini 3.8 Flash 行为准，演示完全够用。
+> - 注意：`gemini-2.5-flash` 已对新建 API 项目关闭，本项目用的是 `gemini-3.8-flash`。
 > - 如果有多个 Key，可以后面用 `GEMINI_API_KEYS` 配主备轮换。
 
 ---
@@ -91,7 +92,8 @@ Google Gemini
 
 | 现象 | 原因 | 解决 |
 | --- | --- | --- |
-| 一直是 **Preview mode** | 变量没生效 / 名字拼错 | 确认 Key 叫 `GEMINI_API_KEY`（全大写、下划线）；然后重新部署一次 |
+| 一直是 **Preview mode** | 变量没生效 / 名字拼错 / 加在了项目层 | 确认 Key 叫 `GEMINI_API_KEY`，加在**站点**的环境变量里；然后重新部署一次 |
+| 控制台出现 `AI unavailable (404)` 且提示 model no longer available | Google 下线了旧模型 | 本项目已切换为 `gemini-3.8-flash`；如果自己改过 `GEMINI_MODEL`，请改回新模型名 |
 | Netlify 显示变量已加，但仍 Preview | 加完没有重新部署 | 按第 3 步再部署 |
 | 控制台出现 `AI unavailable (400)` | Key 无效或被删 | 去 AI Studio 重新生成 Key，替换变量值后重新部署 |
 | 控制台出现 `AI unavailable (429)` | 免费额度用完了 | 等 1 分钟再试；或加 `GEMINI_API_KEYS` 配第二个 Key 自动轮换 |
@@ -115,9 +117,10 @@ fetch('/.netlify/functions/companion', { method: 'POST', headers: { 'Content-Typ
 | 场景 | 做法 |
 | --- | --- |
 | 主备 Key 轮换 | 再加一个变量 `GEMINI_API_KEYS`，值用英文逗号分隔：`AIza...1,AIza...2`。主 Key 遇到 429/403 会自动切到下一个 |
-| 换模型 | 加变量 `GEMINI_MODEL`，比如 `gemini-flash-latest` |
+| 换模型 | 加变量 `GEMINI_MODEL`，比如 `gemini-3.6-flash` 或 `gemini-3.5-flash-lite` |
+| 调整思考强度 | 加变量 `GEMINI_THINKING_LEVEL`：`low`（默认，最快）/ `medium` / `high` |
 | 本地开发调试 | `npx netlify-cli dev`（需要先 `npx netlify-cli login` 和 `npx netlify-cli link`），本地也能跑函数 |
-| 调整角色人格 | 改 `src/lib/companionAI.js` 里的 `buildSystemPrompt()`；改 `netlify/functions/companion.js` 里的 `temperature`（默认 0.85） |
+| 调整角色人格 | 改 `src/lib/companionAI.js` 里的 `buildSystemPrompt()`（Gemini 3.x 已弃用 temperature，语气靠 system prompt 控制） |
 
 ---
 
@@ -139,3 +142,24 @@ fetch('/.netlify/functions/companion', { method: 'POST', headers: { 'Content-Typ
 npm run test:ai    # 代理逻辑 14 项
 npm run test:e2e   # 浏览器流程 11 项（需要 playwright-core）
 ```
+
+
+---
+
+## 附录：新版 Netlify 里环境变量到底在哪？
+
+你的截图路径是 `/projects/moricompanion/configuration/env`，那是**新版 Netlify 的"项目（project）"页面**。
+目前这个站点看起来还没有 project 级变量，变量应该放在**站点（site）级**：
+
+| 入口 | 地址 | 说明 |
+| --- | --- | --- |
+| 站点环境变量（推荐） | `https://app.netlify.com/sites/moricompanion/configuration/env` | 函数运行时读取的就是这里 |
+| 项目环境变量（你截图那个） | `https://app.netlify.com/projects/moricompanion/configuration/env` | 新版项目层，未关联时可能为空 |
+
+如果打开站点地址仍然显示 "No environment variables set"，可以试试：
+
+1. 在 Netlify 左侧 **Sites** 列表里找到站点，点进去（不要从 Projects 进入）；
+2. **Site configuration** → **Environment variables** → **Add a variable**；
+3. 如果新版界面把它合并到了项目里：先确认 **Projects → moricompanion → 关联的 Site**，在 Site 下再加。
+
+加完之后再按第 3 步重新部署，然后在聊天页看右上角是否变成 **Gemini · live**。

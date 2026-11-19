@@ -5,26 +5,27 @@
  * The API key lives ONLY in Netlify environment variables:
  *   GEMINI_API_KEY   (required)  e.g. AIza...
  *   GEMINI_API_KEYS  (optional)  comma-separated pool for rotation
- *   GEMINI_MODEL     (optional)  default: gemini-2.5-flash
+ *   GEMINI_MODEL     (optional)  default: gemini-3.8-flash
+ *   GEMINI_THINKING_LEVEL (optional) default: low (faster, cheaper chat)
+ *
+ * Uses the Interactions API (POST /v1beta/interactions), the recommended
+ * interface for Gemini 3.x models:
+ *   { model, input:[{type:'user_input',...}], system_instruction, generation_config }
+ * Note for Gemini 3.x: temperature/top_p are deprecated and NOT sent.
  *
  * The browser never receives the key. If no key is configured, the function
- * answers 503 and the client falls back to its built-in mock replies.
+ * answers 200 { configured: false } and the client falls back to mock replies.
  */
 
-const DEFAULT_MODEL = 'gemini-2.5-flash';
-
-const SAFETY_SETTINGS = [
-  { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
-  { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
-  { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
-  { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
-];
+const DEFAULT_MODEL = 'gemini-3.8-flash';
+const INTERACTIONS_URL = 'https://generativelanguage.googleapis.com/v1beta/interactions';
 
 /**
- * Recent messages are forwarded for conversational continuity.
- * Clients may send either { userMessage, history } or { messages: [...] }.
+ * Conversation history is sent statelessly with every call.
+ * Clients may send { userMessage, messages: [{ role, content }] }.
+ * Gemini requires the first turn to be the user and no trailing model turn.
  */
-function normalizeMessages(body = {}) {
+function normalizeInput(body = {}) {
   const raw = Array.isArray(body.messages)
     ? body.messages
     : Array.isArray(body.history)
@@ -33,44 +34,60 @@ function normalizeMessages(body = {}) {
         ? [{ role: 'user', content: body.userMessage }]
         : [];
 
-  return raw
+  const turns = raw
     .filter((message) => message && typeof message.content === 'string' && message.content.trim())
     .slice(-10)
     .map((message) => ({
       role: message.role === 'assistant' || message.role === 'model' ? 'model' : 'user',
-      parts: [{ text: message.content.trim().slice(0, 2000) }],
+      text: message.content.trim().slice(0, 2000),
     }));
+
+  // Drop leading model turns and a trailing model turn (prefill is rejected).
+  while (turns.length && turns[0].role !== 'user') turns.shift();
+  while (turns.length && turns[turns.length - 1].role !== 'user') turns.pop();
+
+  return turns.map((turn) =>
+    turn.role === 'model'
+      ? { type: 'model_output', content: [{ type: 'text', text: turn.text }] }
+      : { type: 'user_input', content: [{ type: 'text', text: turn.text }] },
+  );
 }
 
-function buildGeminiRequest(body = {}) {
+function buildInteractionRequest(body = {}) {
   return {
     model: body.model || process.env.GEMINI_MODEL || DEFAULT_MODEL,
     payload: {
-      systemInstruction: {
-        parts: [{ text: String(body.systemPrompt || '').slice(0, 8000) }],
+      model: body.model || process.env.GEMINI_MODEL || DEFAULT_MODEL,
+      input: normalizeInput(body),
+      system_instruction: String(body.systemPrompt || '').slice(0, 8000),
+      generation_config: {
+        max_output_tokens: 512,
+        thinking_level: process.env.GEMINI_THINKING_LEVEL || 'low',
       },
-      contents: normalizeMessages(body),
-      generationConfig: {
-        temperature: 0.85,
-        topP: 0.95,
-        maxOutputTokens: 256,
-        // Gemini 2.5 thinking is disabled for snappy chat replies; other
-        // model families simply ignore this field.
-        thinkingConfig: { thinkingBudget: 0 },
-      },
-      safetySettings: SAFETY_SETTINGS,
+      store: false,
     },
   };
 }
 
 function extractReply(data) {
-  const candidate = data?.candidates?.[0];
-  const text = (candidate?.content?.parts || [])
-    .map((part) => part?.text || '')
-    .join('')
+  if (typeof data?.output_text === 'string' && data.output_text.trim()) {
+    return stripFormatting(data.output_text);
+  }
+  // Defensive fallback for alternate response shapes.
+  const steps = Array.isArray(data?.output) ? data.output : Array.isArray(data?.steps) ? data.steps : [];
+  const text = steps
+    .flatMap((step) => (Array.isArray(step?.content) ? step.content : []))
+    .filter((part) => part?.type === 'text' && !part?.thought)
+    .map((part) => part.text)
+    .join('');
+  return stripFormatting(text);
+}
+
+function stripFormatting(value) {
+  return String(value || '')
     .replace(/\*\*/g, '')
+    .replace(/^#{1,6}\s+/gm, '')
     .trim();
-  return { text, finishReason: candidate?.finishReason || null, blocked: !text };
 }
 
 function getKeys() {
@@ -130,14 +147,13 @@ export default async function handler(request) {
     return json(429, { error: 'Too many requests. Breathe for a minute.' });
   }
 
-  const { model, payload } = buildGeminiRequest(body);
-  if (!payload.contents.length) {
+  const { model, payload } = buildInteractionRequest(body);
+  if (!payload.input.length) {
     return json(400, { error: 'A user message is required.' });
   }
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15_000);
+  const timeout = setTimeout(() => controller.abort(), 25_000);
   let lastError = null;
 
   try {
@@ -145,7 +161,7 @@ export default async function handler(request) {
     for (const key of keys) {
       let response;
       try {
-        response = await fetch(url, {
+        response = await fetch(INTERACTIONS_URL, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -155,20 +171,29 @@ export default async function handler(request) {
           signal: controller.signal,
         });
       } catch (error) {
-        lastError = { status: 502, message: error?.name === 'AbortError' ? 'Gemini timed out.' : 'Gemini is unreachable.' };
+        lastError = {
+          status: 502,
+          message: error?.name === 'AbortError' ? 'Gemini timed out.' : 'Gemini is unreachable.',
+        };
         break;
       }
 
       const data = await response.json().catch(() => ({}));
       if (response.ok) {
-        const { text } = extractReply(data);
-        if (text) return json(200, { reply: text, model, provider: 'gemini' });
-        // Empty or safety-blocked candidate: not a client error, let the UI mock reply.
+        const reply = extractReply(data);
+        if (reply) return json(200, { reply, model, provider: 'gemini' });
         lastError = { status: 502, message: 'The companion had nothing to say.' };
+        if (data?.id) lastError.interactionId = data.id;
         continue;
       }
 
-      lastError = { status: response.status, message: data?.error?.message || `Gemini returned ${response.status}.` };
+      const detail = Array.isArray(data)
+        ? data[0]?.error
+        : data?.error || data;
+      lastError = {
+        status: response.status,
+        message: detail?.message || `Gemini returned ${response.status}.`,
+      };
       const retryable = [401, 403, 429].includes(response.status) || response.status >= 500;
       if (!retryable) break;
     }
@@ -180,5 +205,8 @@ export default async function handler(request) {
   // 4xx means the client should not retry; everything else maps to 502 so the
   // UI quietly falls back to mock replies instead of showing an error.
   const clientStatus = lastError?.status >= 400 && lastError.status < 500 ? lastError.status : 502;
-  return json(clientStatus, { error: lastError?.message || 'Gemini request failed.' });
+  return json(clientStatus, {
+    error: lastError?.message || 'Gemini request failed.',
+    model,
+  });
 }

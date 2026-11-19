@@ -1,21 +1,19 @@
 /**
  * Local test harness for the Gemini proxy — NO real API key required.
- * Starts the Netlify function with a mocked Gemini endpoint.
+ * Starts the Netlify function with a mocked Gemini Interactions endpoint.
  *
  *   node scripts/test-companion-function.mjs
  */
-import http from 'node:http';
-
+const GEMINI_INTERACTIONS = 'https://generativelanguage.googleapis.com/v1beta/interactions';
 const GEMINI_CALLS = [];
 let mockGeminiHandler = null;
 
 // Intercept the outbound Gemini request.
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (url, options = {}) => {
-  const target = String(url);
-  if (target.startsWith('https://generativelanguage.googleapis.com/')) {
+  if (String(url).startsWith('https://generativelanguage.googleapis.com/')) {
     const body = JSON.parse(options.body || '{}');
-    GEMINI_CALLS.push({ url: target, key: options.headers?.['x-goog-api-key'], body });
+    GEMINI_CALLS.push({ url: String(url), key: options.headers?.['x-goog-api-key'], body });
     const result = mockGeminiHandler(body);
     return new Response(JSON.stringify(result.body), { status: result.status || 200 });
   }
@@ -33,7 +31,7 @@ function makeRequest(body, method = 'POST') {
 }
 
 const REPLY = 'Stuck usually means the next step is too big, Mira. Open the document and write one ugly sentence — the forest will do the rest.';
-const ok = (body) => ({ body: { candidates: [{ content: { parts: [{ text: body }] }, finishReason: 'STOP' }] } });
+const ok = (text) => ({ body: { id: 'int_123', status: 'completed', output_text: text } });
 
 const results = [];
 function check(name, pass, detail = '') {
@@ -52,37 +50,57 @@ const conversation = {
   context: { nickname: 'Mira', streak: 9 },
 };
 
-// 1) Happy path
+// 1) No key
 delete process.env.GEMINI_API_KEY;
 delete process.env.GEMINI_API_KEYS;
 let res = await handler(makeRequest(conversation));
-let firstBody = await res.json();
+let data = await res.json();
 check(
-  'No key configured → 200 { configured: false } fallback signal',
-  res.status === 200 && firstBody.configured === false && firstBody.reply === null,
-  `status ${res.status} ${JSON.stringify(firstBody)}`,
+  'No key configured → 200 { configured: false }',
+  res.status === 200 && data.configured === false && data.reply === null,
+  JSON.stringify(data),
 );
 
+// 2) Happy path
 process.env.GEMINI_API_KEY = 'test-key-primary';
 mockGeminiHandler = () => ok(REPLY);
 res = await handler(makeRequest(conversation));
-let data = await res.json();
+data = await res.json();
 check('Valid key → 200 with Gemini reply', res.status === 200 && data.reply === REPLY, `status ${res.status}`);
-check('Model defaults to gemini-2.5-flash', GEMINI_CALLS.at(-1)?.url.includes('gemini-2.5-flash'), GEMINI_CALLS.at(-1)?.url.split('/models/')[1]);
-const sent = GEMINI_CALLS.at(-1)?.body;
-check('System instruction forwarded', sent?.systemInstruction?.parts?.[0]?.text?.includes('Boba'));
-check('Conversation history forwarded (3 turns)', sent?.contents?.length === 3, `contents ${sent?.contents?.length}`);
-check('Assistant turns mapped to model role', sent?.contents?.[1]?.role === 'model');
-check('Thinking disabled for fast chat', sent?.generationConfig?.thinkingConfig?.thinkingBudget === 0);
-check('Key sent in x-goog-api-key header', GEMINI_CALLS.at(-1)?.key === 'test-key-primary');
+const call = GEMINI_CALLS.at(-1);
+check('Uses Interactions API endpoint', call?.url === GEMINI_INTERACTIONS, call?.url);
+check('Model defaults to gemini-3.8-flash', call?.body?.model === 'gemini-3.8-flash', call?.body?.model);
+check('System instruction forwarded (snake_case)', call?.body?.system_instruction?.includes('Boba'));
+check('Conversation sent as 3 turns', call?.body?.input?.length === 3, `input ${call?.body?.input?.length}`);
+check('First turn is user_input', call?.body?.input?.[0]?.type === 'user_input');
+check('Assistant turns mapped to model_output', call?.body?.input?.[1]?.type === 'model_output');
+check('Last turn is user_input (no prefill)', call?.body?.input?.at(-1)?.type === 'user_input');
+check('No deprecated temperature/top_p sent', !('temperature' in (call?.body?.generation_config || {})) && !('top_p' in (call?.body?.generation_config || {})));
+check('thinking_level=low for snappy chat', call?.body?.generation_config?.thinking_level === 'low');
+check('store=false (no PII retained server-side)', call?.body?.store === false);
+check('Key sent in x-goog-api-key header', call?.key === 'test-key-primary');
 
-// 2) Markdown bold stripped
+// 3) Markdown stripped
 mockGeminiHandler = () => ok('**Proud of you**, Mira. Rest counts too.');
 res = await handler(makeRequest(conversation));
 data = await res.json();
 check('Markdown bold removed', data.reply === 'Proud of you, Mira. Rest counts too.', data.reply);
 
-// 3) Quota error rotates to the backup key
+// 4) Trailing assistant turn is dropped (prefill would 400)
+mockGeminiHandler = () => ok('Sure.');
+await handler(
+  makeRequest({
+    systemPrompt: 'x',
+    messages: [
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'hi there' },
+    ],
+  }),
+);
+const trimmed = GEMINI_CALLS.at(-1).body.input;
+check('Trailing model turn removed', trimmed.length === 1 && trimmed[0].type === 'user_input', `${trimmed.length} turns`);
+
+// 5) Quota error rotates to backup key
 process.env.GEMINI_API_KEYS = 'test-key-backup';
 let callCount = 0;
 mockGeminiHandler = () => {
@@ -95,25 +113,50 @@ res = await handler(makeRequest(conversation));
 data = await res.json();
 check('429 on primary → retries with backup key', res.status === 200 && data.reply.includes('Backup key'), `status ${res.status}`);
 
-// 4) Invalid key → client fallback status
+// 6) Invalid key → surfaced
 process.env.GEMINI_API_KEYS = '';
-callCount = 0;
 mockGeminiHandler = () => ({ status: 400, body: { error: { code: 400, message: 'API key not valid. Please pass a valid API key.' } } });
 res = await handler(makeRequest(conversation));
 data = await res.json();
 check('Invalid key → 400 surfaced', res.status === 400 && /key not valid/i.test(data.error), data.error);
 
-// 5) Safety block (no candidate text) with status 200
-mockGeminiHandler = () => ({ body: { candidates: [{ finishReason: 'SAFETY' }] } });
+// 7) Model retired → 404 surfaced
+mockGeminiHandler = () => ({
+  status: 404,
+  body: { error: { code: 404, message: 'This model models/gemini-2.5-flash is no longer available to new users.' } },
+});
 res = await handler(makeRequest(conversation));
-check('Blocked/empty candidate → 502 (triggers mock fallback)', res.status === 502, `status ${res.status}`);
+data = await res.json();
+check('Retired model → 404 surfaced', res.status === 404 && /no longer available/.test(data.error));
 
-// 6) Request validation
+// 8) Completed interaction with empty text → 502 (mock fallback)
+mockGeminiHandler = () => ({ body: { id: 'int_x', status: 'completed', output_text: '' } });
+res = await handler(makeRequest(conversation));
+check('Empty output_text → 502 (triggers mock fallback)', res.status === 502, `status ${res.status}`);
+
+// 9) Alternate response shape fallback
+mockGeminiHandler = () => ({
+  body: {
+    id: 'int_y',
+    output: [
+      { type: 'thought', content: [{ type: 'text', text: 'hidden reasoning', thought: true }] },
+      { type: 'model_output', content: [{ type: 'text', text: 'From the steps shape.' }] },
+    ],
+  },
+});
+res = await handler(makeRequest(conversation));
+data = await res.json();
+check('Alternate output[] shape parsed', res.status === 200 && data.reply === 'From the steps shape.', data.reply);
+
+// 10) Validation
 res = await handler(makeRequest({}, 'GET'));
 check('GET → 405', res.status === 405);
 delete process.env.GEMINI_API_KEY;
 res = await handler(new Request('https://example.netlify.app/x', { method: 'POST', body: 'not-json' }));
 check('Invalid JSON → 400', res.status === 400);
+process.env.GEMINI_API_KEY = 'test-key-primary';
+res = await handler(makeRequest({ messages: [{ role: 'assistant', content: 'only model turn' }] }));
+check('No user turn → 400', res.status === 400);
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

@@ -11,8 +11,10 @@ const GEMINI_BASE = 'https://generativelanguage.googleapis.com';
 const MOCK_BASE = process.env.GEMINI_MOCK_URL;
 if (MOCK_BASE) {
   const realFetch = globalThis.fetch;
-  globalThis.fetch = (url, options) =>
-    realFetch(String(url).replace(GEMINI_BASE, MOCK_BASE), options);
+  globalThis.fetch = (url, options) => {
+    const target = String(url).replace(GEMINI_BASE, MOCK_BASE);
+    return realFetch(target, options);
+  };
 }
 
 const { default: handler } = await import('../netlify/functions/companion.js');

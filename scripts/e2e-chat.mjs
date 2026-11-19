@@ -86,18 +86,18 @@ try {
   const base = `http://127.0.0.1:${FN_PORT}`;
 
   // --- With key: Gemini path ---
-  const reset = await fetch(`http://127.0.0.1:${GEMINI_MOCK_PORT}/_reset`).catch(() => null);
-  if (!reset) await fetch(`http://127.0.0.1:${GEMINI_MOCK_PORT}/_calls?reset=1`).catch(() => null);
   const live = await runChrome(base);
   check('With key: badge shows Gemini · live', live.badge.includes('GEMINI · LIVE'), live.badge);
-  check('With key: footer credits Gemini 2.5 Flash', live.footer.includes('gemini 2.5 flash'), live.footer);
+  check('With key: footer credits Gemini 3.8 Flash', live.footer.includes('gemini 3.8 flash'), live.footer);
   check('With key: replies come from Gemini (mock echo text)', live.bubbles.at(-1).includes('shrink it down'), live.bubbles.at(-1).slice(0, 60));
   check('With key: reply bubbles labeled "via Gemini"', live.meta >= 2, `${live.meta} labels`);
   const calls = await (await fetch(`http://127.0.0.1:${GEMINI_MOCK_PORT}/_calls`)).json();
-  const chatCalls = calls.filter((c) => c.contents?.length);
-  const secondTurn = chatCalls.find((c) => c.contents.some((x) => x.parts[0].text === 'and my streak?'));
-  check('With key: proxy called Gemini', chatCalls.length >= 2, `${chatCalls.length} chat calls`);
-  check('With key: turn 2 carries conversation memory', Boolean(secondTurn) && secondTurn.contents.length >= 3, secondTurn ? secondTurn.contents.map((x) => x.role).join('→') : 'missing');
+  const chatCalls = calls.filter((c) => c.input?.length);
+  const textOf = (turn) => (turn.content || []).map((part) => part.text).join('');
+  const secondTurn = chatCalls.find((c) => c.input.some((turn) => textOf(turn) === 'and my streak?'));
+  check('With key: proxy called Gemini Interactions API', chatCalls.length >= 2 && chatCalls.at(-1).url.includes('/interactions'), `${chatCalls.length} chat calls`);
+  check('With key: model is gemini-3.8-flash', chatCalls.at(-1)?.model === 'gemini-3.8-flash', chatCalls.at(-1)?.model);
+  check('With key: turn 2 carries conversation memory', Boolean(secondTurn) && secondTurn.input.length >= 3, secondTurn ? secondTurn.input.map((x) => x.type).join('→') : 'missing');
   check('With key: system prompt includes study data', /Level \d+, \d+-day streak/.test(chatCalls.at(-1)?.system || ''));
   check('With key: API key never in browser console errors', live.errors.length === 0, live.errors.join(' | '));
 

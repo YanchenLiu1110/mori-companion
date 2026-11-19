@@ -75,14 +75,14 @@ The companion page combines the full character stage, a data-driven growth timel
 
 ## Companion AI — Gemini via Netlify Functions
 
-Chat is powered by **Gemini 2.5 Flash** through a serverless proxy:
+Chat is powered by **Gemini 3.8 Flash** through a serverless proxy:
 
 ```text
 Browser (chat UI)
    │  POST /.netlify/functions/companion
    ▼
 Netlify Function  netlify/functions/companion.js   ← GEMINI_API_KEY lives only here
-   │  POST generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent
+   │  POST generativelanguage.googleapis.com/v1beta/interactions  (Gemini 3.x Interactions API)
    ▼
 Google Gemini
 ```
@@ -105,7 +105,8 @@ Optional server variables:
 | --- | --- |
 | `GEMINI_API_KEY` | Primary key (required). |
 | `GEMINI_API_KEYS` | Comma-separated extra keys, rotated automatically on 429/403. |
-| `GEMINI_MODEL` | Override the model (default `gemini-2.5-flash`). |
+| `GEMINI_MODEL` | Override the model (default `gemini-3.8-flash`). |
+| `GEMINI_THINKING_LEVEL` | `low` / `medium` / `high`. Default `low` keeps chat snappy and cheap. |
 
 ### Local development
 
@@ -122,7 +123,7 @@ Without a key locally, chat simply uses mock replies — everything else works.
 
 ```bash
 npm install playwright-core --no-save   # only needed for the browser test
-npm run test:ai    # 14 proxy checks against a mocked Gemini endpoint
+npm run test:ai    # 23 proxy checks against a mocked Gemini Interactions endpoint
 npm run test:e2e   # boots mock servers + Chrome, verifies live + fallback paths
 ```
 

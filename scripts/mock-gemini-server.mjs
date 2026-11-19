@@ -16,20 +16,21 @@ const server = http.createServer((req, res) => {
     }
     const body = JSON.parse(Buffer.concat(chunks).toString() || '{}');
     calls.push({
+      url: req.url,
       key: req.headers['x-goog-api-key'],
-      contents: body.contents || [],
-      system: body.systemInstruction?.parts?.[0]?.text || '',
-      generationConfig: body.generationConfig,
+      model: body.model,
+      input: body.input || [],
+      system: body.system_instruction || '',
+      generationConfig: body.generation_config,
     });
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(
       JSON.stringify({
-        candidates: [
-          {
-            content: { parts: [{ text: "Yeah — let's shrink it down. Open the doc, Mira, write one messy sentence, and I'll wait by the window." }] },
-            finishReason: 'STOP',
-          },
-        ],
+        id: `interaction_${Date.now()}`,
+        object: 'interaction',
+        model: body.model,
+        status: 'completed',
+        output_text: "Yeah — let's shrink it down. Open the doc, Mira, write one messy sentence, and I'll wait by the window.",
       }),
     );
   });
