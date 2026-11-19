@@ -7,6 +7,9 @@
  *   GEMINI_API_KEYS  (optional)  comma-separated pool for rotation
  *   GEMINI_MODEL     (optional)  default: gemini-3.8-flash
  *   GEMINI_THINKING_LEVEL (optional) default: low (faster, cheaper chat)
+ *   GEMINI_FALLBACK_MODELS (optional) comma-separated models to try when the
+ *                          primary is overloaded/unavailable. Default:
+ *                          gemini-3.6-flash,gemini-3.5-flash-lite
  *
  * Uses the Interactions API (POST /v1beta/interactions), the recommended
  * interface for Gemini 3.x models:
@@ -18,6 +21,8 @@
  */
 
 const DEFAULT_MODEL = 'gemini-3.8-flash';
+const DEFAULT_FALLBACKS = 'gemini-3.6-flash,gemini-3.5-flash-lite';
+const OVERLOAD_PATTERN = /high demand|overloaded|unavailable|temporarily|try again later|resource_exhausted|no longer available/i;
 const INTERACTIONS_URL = 'https://generativelanguage.googleapis.com/v1beta/interactions';
 
 /**
@@ -53,11 +58,12 @@ function normalizeInput(body = {}) {
   );
 }
 
-function buildInteractionRequest(body = {}) {
+function buildInteractionRequest(body = {}, modelOverride) {
+  const model = modelOverride || body.model || process.env.GEMINI_MODEL || DEFAULT_MODEL;
   return {
-    model: body.model || process.env.GEMINI_MODEL || DEFAULT_MODEL,
+    model,
     payload: {
-      model: body.model || process.env.GEMINI_MODEL || DEFAULT_MODEL,
+      model,
       input: normalizeInput(body),
       system_instruction: String(body.systemPrompt || '').slice(0, 8000),
       generation_config: {
@@ -125,6 +131,41 @@ function json(status, payload) {
   });
 }
 
+function primaryModel() {
+  return process.env.GEMINI_MODEL || DEFAULT_MODEL;
+}
+
+/** Primary model first, then distinct fallbacks configured on the server. */
+function modelChain() {
+  const fallbacks = String(process.env.GEMINI_FALLBACK_MODELS ?? DEFAULT_FALLBACKS)
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return [...new Set([primaryModel(), ...fallbacks])];
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function callGemini({ key, model, payload, signal }) {
+  const response = await fetch(INTERACTIONS_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': key,
+    },
+    body: JSON.stringify({ ...payload, model }),
+    signal,
+  });
+  const data = await response.json().catch(() => ({}));
+  const detail = Array.isArray(data) ? data[0]?.error : data?.error || data;
+  return {
+    ok: response.ok,
+    status: response.status,
+    message: detail?.message || `Gemini returned ${response.status}.`,
+    data,
+  };
+}
+
 export default async function handler(request) {
   if (request.method !== 'POST') {
     return json(405, { error: 'Method not allowed' });
@@ -147,55 +188,56 @@ export default async function handler(request) {
     return json(429, { error: 'Too many requests. Breathe for a minute.' });
   }
 
-  const { model, payload } = buildInteractionRequest(body);
+  const { model, payload } = buildInteractionRequest(body, primaryModel());
   if (!payload.input.length) {
     return json(400, { error: 'A user message is required.' });
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 25_000);
+  const timeout = setTimeout(() => controller.abort(), 45_000);
   let lastError = null;
+  let sawQuotaError = false;
 
   try {
-    // Try each key in the pool; rotate on quota/auth failures.
     for (const key of keys) {
-      let response;
-      try {
-        response = await fetch(INTERACTIONS_URL, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-goog-api-key': key,
-          },
-          body: JSON.stringify(payload),
-          signal: controller.signal,
-        });
-      } catch (error) {
-        lastError = {
-          status: 502,
-          message: error?.name === 'AbortError' ? 'Gemini timed out.' : 'Gemini is unreachable.',
-        };
-        break;
-      }
+      for (const model of modelChain()) {
+        const { payload } = buildInteractionRequest(body, model);
+        const attempts = [0, 600, 1400]; // one try + two short back-off retries
+        for (const delay of attempts) {
+          if (delay) await sleep(delay + Math.random() * 250);
+          let result;
+          try {
+            result = await callGemini({ key, model, payload, signal: controller.signal });
+          } catch (error) {
+            lastError = {
+              status: 502,
+              message: error?.name === 'AbortError' ? 'Gemini timed out.' : 'Gemini is unreachable.',
+            };
+            break;
+          }
 
-      const data = await response.json().catch(() => ({}));
-      if (response.ok) {
-        const reply = extractReply(data);
-        if (reply) return json(200, { reply, model, provider: 'gemini' });
-        lastError = { status: 502, message: 'The companion had nothing to say.' };
-        if (data?.id) lastError.interactionId = data.id;
-        continue;
-      }
+          if (result.ok) {
+            const reply = extractReply(result.data);
+            if (reply) {
+              return json(200, { reply, model, provider: 'gemini', fallback: model !== primaryModel() });
+            }
+            lastError = { status: 502, message: 'The companion had nothing to say.', model };
+            break;
+          }
 
-      const detail = Array.isArray(data)
-        ? data[0]?.error
-        : data?.error || data;
-      lastError = {
-        status: response.status,
-        message: detail?.message || `Gemini returned ${response.status}.`,
-      };
-      const retryable = [401, 403, 429].includes(response.status) || response.status >= 500;
-      if (!retryable) break;
+          lastError = { status: result.status, message: result.message, model };
+          if (result.status === 429 || /resource_exhausted|quota/i.test(result.message)) sawQuotaError = true;
+
+          // Only overload / availability errors are worth retrying.
+          if (!(result.status >= 500 || result.status === 429) || !OVERLOAD_PATTERN.test(result.message)) break;
+        }
+
+        const authFailure = [401, 403].includes(lastError?.status) && !/quota|demand|overloaded/i.test(lastError?.message || '');
+        if (authFailure) break; // bad key: moving to the next model with the same key is pointless
+        if (lastError?.status >= 400 && lastError.status < 500 && lastError.status !== 429) break;
+      }
+      // Another key only helps for quota errors, not for auth failures.
+      if (!sawQuotaError) break;
     }
   } finally {
     clearTimeout(timeout);
@@ -207,6 +249,7 @@ export default async function handler(request) {
   const clientStatus = lastError?.status >= 400 && lastError.status < 500 ? lastError.status : 502;
   return json(clientStatus, {
     error: lastError?.message || 'Gemini request failed.',
-    model,
+    model: lastError?.model || primaryModel(),
+    retryable: clientStatus === 502 || clientStatus === 429,
   });
 }

@@ -15,7 +15,7 @@
 
 const FUNCTION_ENDPOINT = '/.netlify/functions/companion';
 const ENDPOINT = (import.meta.env.VITE_MORI_LLM_ENDPOINT || '').trim() || FUNCTION_ENDPOINT;
-const REQUEST_TIMEOUT_MS = 18_000;
+const REQUEST_TIMEOUT_MS = 50_000; // proxy may retry + fall back before answering
 
 export const AI_ENGINE = {
   model: 'Gemini 3.8 Flash',
@@ -23,9 +23,14 @@ export const AI_ENGINE = {
 };
 
 let replySource = 'mock';
+let replyModel = null;
 
 export function lastReplySource() {
   return replySource;
+}
+
+export function lastReplyModel() {
+  return replyModel;
 }
 
 const MOCK_REPLIES = {
@@ -112,6 +117,7 @@ export async function generateCompanionReply(userMessage, studyData = {}) {
     const data = await response.json().catch(() => ({}));
     if (response.ok && typeof data.reply === 'string' && data.reply.trim()) {
       replySource = 'gemini';
+      replyModel = data.model || null;
       return data.reply.trim();
     }
     if (data.configured === false) {

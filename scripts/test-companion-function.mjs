@@ -148,6 +148,54 @@ res = await handler(makeRequest(conversation));
 data = await res.json();
 check('Alternate output[] shape parsed', res.status === 200 && data.reply === 'From the steps shape.', data.reply);
 
+// Rescue: overloaded primary → retry succeeds (Gemini's "high demand" error)
+process.env.GEMINI_API_KEY = 'test-key-primary';
+delete process.env.GEMINI_API_KEYS;
+let tries = 0;
+mockGeminiHandler = () => {
+  tries += 1;
+  return tries === 1
+    ? { status: 503, body: { error: { code: 503, message: 'gemini-3.8-flash is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.' } } }
+    : ok('Second try worked, Mira.');
+};
+res = await handler(makeRequest(conversation));
+data = await res.json();
+check('Overloaded on first try → auto retry succeeds', res.status === 200 && data.reply.includes('Second try'), `status ${res.status}, attempts ${tries}`);
+
+// Rescue: primary overloaded for all attempts → fallback model answers
+const modelTries = {};
+mockGeminiHandler = (body) => {
+  modelTries[body.model] = (modelTries[body.model] || 0) + 1;
+  if (body.model === 'gemini-3.8-flash') {
+    return { status: 503, body: { error: { code: 503, message: 'gemini-3.8-flash is currently experiencing high demand. Please try again later.' } } };
+  }
+  return ok(`Fallback ${body.model} here.`);
+};
+res = await handler(makeRequest(conversation));
+data = await res.json();
+check(
+  'Primary fully overloaded → fallback model answers',
+  res.status === 200 && data.fallback === true && data.model === 'gemini-3.6-flash',
+  `${data.model} · ${JSON.stringify(modelTries)}`,
+);
+
+// No fallback on real 4xx client errors (bad request should not fan out)
+let fanOut = 0;
+mockGeminiHandler = () => {
+  fanOut += 1;
+  return { status: 400, body: { error: { code: 400, message: 'Invalid argument: bad input.' } } };
+};
+res = await handler(makeRequest(conversation));
+check('400 is not retried across models', res.status === 400 && fanOut === 1, `${fanOut} attempts`);
+
+// Every model down → 502 with retryable flag
+process.env.GEMINI_FALLBACK_MODELS = 'gemini-3.6-flash';
+mockGeminiHandler = () => ({ status: 500, body: { error: { code: 500, message: 'Internal error encountered.' } } });
+res = await handler(makeRequest(conversation));
+data = await res.json();
+check('All models down → 502 retryable', res.status === 502 && data.retryable === true, JSON.stringify(data));
+delete process.env.GEMINI_FALLBACK_MODELS;
+
 // 10) Validation
 res = await handler(makeRequest({}, 'GET'));
 check('GET → 405', res.status === 405);

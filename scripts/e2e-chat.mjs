@@ -67,7 +67,7 @@ async function runChrome(baseUrl) {
     await sleep(1500);
   }
   const bubbles = await page.locator('.whitespace-pre-line').allInnerTexts();
-  const meta = await page.locator('p').filter({ hasText: /via Gemini/ }).count();
+  const meta = await page.locator("p").filter({ hasText: /via gemini-3\.8-flash/i }).count();
   const footer = (await page.getByText(/powered by Gemini|Preview replies/).innerText().catch(() => '')).toLowerCase();
   await browser.close();
   return { badge, bubbles, meta, footer, errors };
@@ -90,7 +90,7 @@ try {
   check('With key: badge shows Gemini · live', live.badge.includes('GEMINI · LIVE'), live.badge);
   check('With key: footer credits Gemini 3.8 Flash', live.footer.includes('gemini 3.8 flash'), live.footer);
   check('With key: replies come from Gemini (mock echo text)', live.bubbles.at(-1).includes('shrink it down'), live.bubbles.at(-1).slice(0, 60));
-  check('With key: reply bubbles labeled "via Gemini"', live.meta >= 2, `${live.meta} labels`);
+  check('With key: reply bubbles labeled "via <model>"', live.meta >= 2, `${live.meta} labels`);
   const calls = await (await fetch(`http://127.0.0.1:${GEMINI_MOCK_PORT}/_calls`)).json();
   const chatCalls = calls.filter((c) => c.input?.length);
   const textOf = (turn) => (turn.content || []).map((part) => part.text).join('');

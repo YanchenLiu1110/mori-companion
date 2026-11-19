@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import { useMori } from '../context/MoriContext.jsx';
 import { EVENTS, track, trackOnce } from '../lib/analytics.js';
-import { AI_ENGINE, generateCompanionReply, lastReplySource } from '../lib/companionAI.js';
+import { AI_ENGINE, generateCompanionReply, lastReplyModel, lastReplySource } from '../lib/companionAI.js';
 import { AI_CONFIGURED, checkCompanionAI } from '../lib/aiStatus.js';
 import { formatDuration, formatLongDate, formatShortDate } from '../lib/date.js';
 import { buildMilestoneStats, buildTimeline } from '../lib/progression.js';
@@ -113,7 +113,10 @@ export function CompanionPage() {
       appendChat({
         role: 'assistant',
         text: reply,
-        meta: `${companion?.name} · ${lastReplySource() === 'gemini' ? 'via Gemini' : 'here with you'}`,
+        meta:
+          lastReplySource() === 'gemini'
+            ? `${companion?.name} · via ${lastReplyModel() || AI_ENGINE.label}`
+            : `${companion?.name} · here with you`,
       });
       track(EVENTS.COMPANION_REPLIED, {
         reply_length: reply.length,
