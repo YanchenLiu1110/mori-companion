@@ -86,6 +86,30 @@ const MOCK_REPLIES = {
   ],
 };
 
+let waiting = false;
+let lastLatencyMs = null;
+
+/** True once the browser has shown the companion is still thinking. */
+export function isWaiting() {
+  return waiting;
+}
+
+export function lastLatency() {
+  return lastLatencyMs;
+}
+
+/** Resolves after `ms`, or immediately once `signal` aborts. */
+function delay(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => {
+      clearTimeout(timer);
+      resolve();
+    }, { once: true });
+  });
+}
+
 export async function generateCompanionReply(userMessage, studyData = {}) {
   const message = String(userMessage || '').trim();
   const context = buildStudyContext(studyData);
@@ -98,8 +122,18 @@ export async function generateCompanionReply(userMessage, studyData = {}) {
       content: item.content.trim().slice(0, 2000),
     }));
 
+  const controller = new AbortController();
+  const startedAt = Date.now();
+  let answered = false;
+  waiting = false;
+
+  // If Gemini is slow, flip the typing bubble to "Boba is thinking…" so the
+  // 20-30s cold path still feels alive instead of frozen.
+  const slowTimer = setTimeout(() => {
+    if (!answered) waiting = true;
+  }, 2_200);
+
   try {
-    const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     const response = await fetch(ENDPOINT, {
       method: 'POST',
@@ -118,6 +152,8 @@ export async function generateCompanionReply(userMessage, studyData = {}) {
     if (response.ok && typeof data.reply === 'string' && data.reply.trim()) {
       replySource = 'gemini';
       replyModel = data.model || null;
+      lastLatencyMs = Date.now() - startedAt;
+      console.info(`[MORI] Gemini replied in ${lastLatencyMs} ms (${data.model}${data.fallback ? ', fallback' : ''})`);
       return data.reply.trim();
     }
     if (data.configured === false) {
@@ -130,9 +166,13 @@ export async function generateCompanionReply(userMessage, studyData = {}) {
   } catch (error) {
     replySource = 'mock';
     console.warn('[MORI] AI request failed; using mock reply.', error?.message || error);
+  } finally {
+    answered = true;
+    clearTimeout(slowTimer);
+    waiting = false;
   }
 
-  await new Promise((resolve) => setTimeout(resolve, 620 + Math.random() * 520));
+  await delay(620 + Math.random() * 520, controller.signal);
   return pickMockReply(message, context);
 }
 

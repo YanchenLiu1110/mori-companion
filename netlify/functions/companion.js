@@ -21,7 +21,8 @@
  */
 
 const DEFAULT_MODEL = 'gemini-3.8-flash';
-const DEFAULT_FALLBACKS = 'gemini-3.6-flash,gemini-3.5-flash-lite';
+const DEFAULT_FALLBACKS = '';
+const DEFAULT_THINKING_LEVEL = process.env.GEMINI_THINKING_LEVEL || 'low';
 const OVERLOAD_PATTERN = /high demand|overloaded|unavailable|temporarily|try again later|resource_exhausted|no longer available/i;
 const INTERACTIONS_URL = 'https://generativelanguage.googleapis.com/v1beta/interactions';
 
@@ -68,7 +69,7 @@ function buildInteractionRequest(body = {}, modelOverride) {
       system_instruction: String(body.systemPrompt || '').slice(0, 8000),
       generation_config: {
         max_output_tokens: 512,
-        thinking_level: process.env.GEMINI_THINKING_LEVEL || 'low',
+        thinking_level: DEFAULT_THINKING_LEVEL,
       },
       store: false,
     },
@@ -166,39 +167,6 @@ async function callGemini({ key, model, payload, signal }) {
   };
 }
 
-/**
- * Netlify's gateway drops idle connections after ~30s. Gemini 3.x can think for
- * a while (or the proxy retries), so the response stream starts with a harmless
- * whitespace keep-alive; the JSON body is appended as soon as it is ready.
- * JSON.parse ignores surrounding whitespace.
- */
-function streamWithKeepAlive(promise, heartbeat) {
-  const encoder = new TextEncoder();
-  let timer = null;
-  return new ReadableStream({
-    start(controller) {
-      if (heartbeat) {
-        controller.enqueue(encoder.encode(' '));
-        timer = setInterval(() => controller.enqueue(encoder.encode(' ')), 5_000);
-      }
-      promise
-        .then(({ status, body }) => {
-          clearInterval(timer);
-          controller.enqueue(encoder.encode(JSON.stringify(body)));
-          controller.close();
-          return status;
-        })
-        .catch(() => {
-          clearInterval(timer);
-          controller.close();
-        });
-    },
-    cancel() {
-      clearInterval(timer);
-    },
-  });
-}
-
 async function handle(request) {
   if (request.method !== 'POST') {
     return { status: 405, body: { error: 'Method not allowed' } };
@@ -221,13 +189,16 @@ async function handle(request) {
     return { status: 429, body: { error: 'Too many requests. Breathe for a minute.' } };
   }
 
-  const { model, payload } = buildInteractionRequest(body, primaryModel());
-  if (!payload.input.length) {
+  const { payload: initialPayload } = buildInteractionRequest(body, primaryModel());
+  if (!initialPayload.input.length) {
     return { status: 400, body: { error: 'A user message is required.' } };
   }
 
+  // Stay well under Netlify's ~30s gateway timeout, and keep replies snappy.
+  const BUDGET_MS = Number(process.env.GEMINI_TIMEOUT_MS || 22_000);
+  const startedAt = Date.now();
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 45_000);
+  const timeout = setTimeout(() => controller.abort(), BUDGET_MS);
   let lastError = null;
   let sawQuotaError = false;
 
@@ -235,7 +206,7 @@ async function handle(request) {
     for (const key of keys) {
       for (const model of modelChain()) {
         const { payload } = buildInteractionRequest(body, model);
-        const attempts = [0, 600, 1400]; // one try + two short back-off retries
+        const attempts = [0, 500]; // one try + one short back-off retry
         for (const delay of attempts) {
           if (delay) await sleep(delay + Math.random() * 250);
           let result;
@@ -252,7 +223,15 @@ async function handle(request) {
           if (result.ok) {
             const reply = extractReply(result.data);
             if (reply) {
-              return { status: 200, heartbeat: true, body: { reply, model, provider: 'gemini', fallback: model !== primaryModel() } };
+              return {
+                status: 200,
+                body: {
+                  reply,
+                  model,
+                  provider: 'gemini',
+                  fallback: model !== primaryModel(),
+                },
+              };
             }
             lastError = { status: 502, message: 'The companion had nothing to say.', model };
             break;
@@ -269,8 +248,8 @@ async function handle(request) {
         if (authFailure) break; // bad key: moving to the next model with the same key is pointless
         if (lastError?.status >= 400 && lastError.status < 500 && lastError.status !== 429) break;
       }
-      // Another key only helps for quota errors, not for auth failures.
-      if (!sawQuotaError) break;
+      // Another key only helps for quota errors, and only if time remains.
+      if (!sawQuotaError || Date.now() - startedAt > BUDGET_MS * 0.7) break;
     }
   } finally {
     clearTimeout(timeout);
@@ -279,7 +258,8 @@ async function handle(request) {
   console.warn('[MORI ai] gemini request failed', lastError);
   // 4xx means the client should not retry; everything else maps to 502 so the
   // UI quietly falls back to mock replies instead of showing an error.
-  const clientStatus = lastError?.status >= 400 && lastError.status < 500 ? lastError.status : 502;
+  const timedOut = lastError?.message === 'Gemini timed out.';
+  const clientStatus = lastError?.status >= 400 && lastError.status < 500 && !timedOut ? lastError.status : 502;
   return { status: clientStatus, body: {
     error: lastError?.message || 'Gemini request failed.',
     model: lastError?.model || primaryModel(),
@@ -288,14 +268,6 @@ async function handle(request) {
 }
 
 export default async function handler(request) {
-  const pending = handle(request);
-  // Keep-alive whitespace only while Gemini is being called (chat POSTs).
-  const wantsHeartbeat = request.method === 'POST' && String(request.url).includes('/companion');
-  return new Response(streamWithKeepAlive(pending, wantsHeartbeat), {
-    status: 200,
-    headers: {
-      'Content-Type': 'application/json',
-      'Cache-Control': 'no-store',
-    },
-  });
+  const { status, body } = await handle(request);
+  return json(status, body);
 }

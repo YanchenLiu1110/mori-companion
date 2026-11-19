@@ -35,6 +35,7 @@ export function CompanionPage() {
   } = useMori();
   const [input, setInput] = useState('');
   const [typing, setTyping] = useState(false);
+  const [waiting, setWaiting] = useState(false);
   const [celebrating, setCelebrating] = useState(false);
   const sendingRef = useRef(false);
   const [aiState, setAiState] = useState(null);
@@ -82,6 +83,13 @@ export function CompanionPage() {
   async function sendMessage(raw) {
     const message = (raw ?? input).trim();
     if (!message || sendingRef.current) return;
+
+    // Snapshot the history BEFORE appending, so the model gets clean turns.
+    const history = chat
+      .filter((item) => item.text && !String(item.meta || '').startsWith('Day '))
+      .slice(-8)
+      .map((item) => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.text }));
+
     sendingRef.current = true;
     setInput('');
     appendChat({ role: 'user', text: message });
@@ -91,6 +99,9 @@ export function CompanionPage() {
       minutes_today: derived?.minutesToday || 0,
     });
     setTyping(true);
+    setWaiting(false);
+    // Gemini can take a while; surface a calmer state instead of frozen dots.
+    const slowTimer = window.setTimeout(() => setWaiting(true), 2400);
 
     try {
       const reply = await generateCompanionReply(message, {
@@ -105,10 +116,7 @@ export function CompanionPage() {
         mood: derived?.mood?.key,
         // Recent turns give Gemini conversation memory. The chrome welcome
         // bubble is skipped so the model does not re-greet every time.
-        history: chat
-          .filter((item) => item.text && !String(item.meta || '').startsWith('Day '))
-          .slice(-8)
-          .map((item) => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.text })),
+        history,
       });
       appendChat({
         role: 'assistant',
@@ -128,6 +136,8 @@ export function CompanionPage() {
         window.setTimeout(() => setCelebrating(false), 1800);
       }
     } finally {
+      window.clearTimeout(slowTimer);
+      setWaiting(false);
       setTyping(false);
       sendingRef.current = false;
       window.setTimeout(() => inputRef.current?.focus(), 60);
@@ -200,6 +210,7 @@ export function CompanionPage() {
           celebrating={celebrating}
           progression={progression}
           aiState={aiState}
+          waiting={waiting}
         />
       </section>
 
@@ -390,6 +401,7 @@ function ChatCard({
   celebrating,
   progression,
   aiState,
+  waiting,
 }) {
   return (
     <div className="card flex h-full min-h-[590px] flex-col overflow-hidden">
@@ -433,7 +445,7 @@ function ChatCard({
           {chat.map((message) => (
             <ChatBubble key={message.id} message={message} companion={companion} />
           ))}
-          {typing && <TypingBubble companion={companion} />}
+          {typing && <TypingBubble companion={companion} waiting={waiting} />}
           {chat.length <= 1 && !typing && (
             <div className="flex flex-col items-center justify-center px-6 py-10 text-center">
               <span className="grid h-12 w-12 place-items-center rounded-full bg-forest-50 text-forest-500">
@@ -521,18 +533,25 @@ function ChatBubble({ message, companion }) {
   );
 }
 
-function TypingBubble({ companion }) {
+function TypingBubble({ companion, waiting }) {
   return (
     <div className="flex items-end gap-2">
       <Avatar companion={companion} mood="ready" size={26} ring={false} className="mb-0.5" />
-      <div className="flex items-center gap-1 rounded-2xl rounded-bl-md border border-line/80 bg-paper px-4 py-3 shadow-sm">
-        {[0, 1, 2].map((index) => (
-          <span
-            key={index}
-            className="h-1.5 w-1.5 animate-bounce rounded-full bg-forest-400"
-            style={{ animationDelay: `${index * 0.12}s`, animationDuration: '0.9s' }}
-          />
-        ))}
+      <div className="rounded-2xl rounded-bl-md border border-line/80 bg-paper px-4 py-3 shadow-sm">
+        <div className="flex items-center gap-1">
+          {[0, 1, 2].map((index) => (
+            <span
+              key={index}
+              className="h-1.5 w-1.5 animate-bounce rounded-full bg-forest-400"
+              style={{ animationDelay: `${index * 0.12}s`, animationDuration: '0.9s' }}
+            />
+          ))}
+        </div>
+        {waiting && (
+          <p className="mt-1.5 text-[0.5rem] font-bold text-forest-800/35">
+            {companion?.name} is thinking it through…
+          </p>
+        )}
       </div>
     </div>
   );

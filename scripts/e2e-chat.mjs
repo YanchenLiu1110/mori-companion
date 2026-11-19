@@ -58,13 +58,20 @@ async function runChrome(baseUrl) {
   await page.getByRole('button', { name: /meet your companion/i }).click();
   await page.getByRole('button', { name: /start my journey/i }).click();
   await page.getByRole('link', { name: /^companion$/i }).click();
-  await sleep(800);
+  await page.getByRole('textbox', { name: /message/i }).waitFor({ timeout: 15000 });
+  await sleep(1200);
   const badge = (await page.locator('span').filter({ hasText: /Preview mode|Gemini · live/ }).allInnerTexts()).join('|').toUpperCase();
   const input = page.getByRole('textbox', { name: /message/i });
   for (const message of ['I feel stuck today', 'and my streak?']) {
+    const bubblesBefore = await page.locator('.whitespace-pre-line').count() + 2;
     await input.fill(message);
     await page.getByRole('button', { name: /send message/i }).click();
-    await sleep(1500);
+    await page.waitForFunction(
+      (count) => document.querySelectorAll('.whitespace-pre-line').length >= count,
+      bubblesBefore,
+      { timeout: 20000 },
+    );
+    await sleep(300);
   }
   const bubbles = await page.locator('.whitespace-pre-line').allInnerTexts();
   const meta = await page.locator("p").filter({ hasText: /via gemini-3\.8-flash/i }).count();

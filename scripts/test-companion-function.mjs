@@ -4,9 +4,10 @@
  *
  *   node scripts/test-companion-function.mjs
  *
- * The proxy streams keep-alive whitespace before the JSON body, so every
- * response here is consumed with call(); real HTTP status codes are covered
- * by scripts/e2e-chat.mjs through a local runtime.
+ * The proxy returns one JSON document, so real HTTP status codes are asserted
+ * directly. (Streaming keep-alive was tried and dropped: Netlify terminates
+ * the edge response once the function returns, so only the first chunk reached
+ * the browser — the JSON was lost.)
  */
 const GEMINI_INTERACTIONS = 'https://generativelanguage.googleapis.com/v1beta/interactions';
 const GEMINI_CALLS = [];
@@ -45,13 +46,12 @@ function errorStatus(data) {
   return 400;
 }
 
-/** Reads the (possibly keep-alive-prefixed) body and classifies the outcome. */
+/** Calls the handler and returns { status, data, raw }. */
 async function call(body, method = 'POST') {
   const response = await handler(makeRequest(body, method));
   const raw = await response.text();
   const data = JSON.parse(raw || '{}');
-  const status = data.configured === false || data.reply ? 200 : data.error ? errorStatus(data) : 200;
-  return { status, data, raw };
+  return { status: response.status, data, raw };
 }
 
 const REPLY = 'Stuck usually means the next step is too big, Mira. Open the document and write one ugly sentence — the forest will do the rest.';
@@ -178,6 +178,7 @@ mockGeminiHandler = () => {
 check('Overloaded on first try → auto retry succeeds', status === 200 && data.reply.includes('Second try'), `status ${status}, attempts ${tries}`);
 
 // 11) Rescue: primary overloaded for every attempt → fallback model answers
+process.env.GEMINI_FALLBACK_MODELS = 'gemini-3.6-flash';
 const modelTries = {};
 mockGeminiHandler = (body) => {
   modelTries[body.model] = (modelTries[body.model] || 0) + 1;
@@ -192,6 +193,7 @@ check(
   status === 200 && data.fallback === true && data.model === 'gemini-3.6-flash',
   `${data.model} · ${JSON.stringify(modelTries)}`,
 );
+delete process.env.GEMINI_FALLBACK_MODELS;
 
 // 12) No fan-out on real 400s
 let fanOut = 0;
@@ -220,14 +222,37 @@ process.env.GEMINI_API_KEY = 'test-key-primary';
 ({ status } = await call({ messages: [{ role: 'assistant', content: 'only model turn' }] }));
 check('No user turn → 400', status === 400);
 
-// 15) Keep-alive framing: body is whitespace + JSON and still parses
+// 15) Response is a single JSON document (no streamed prefix)
 mockGeminiHandler = () => ok('Framing check.');
 const framed = await call(conversation);
 check(
-  'Body tolerates keep-alive whitespace',
-  /^\s*\{/.test(framed.raw) && framed.data.reply === 'Framing check.',
+  'Single JSON body (no streamed prefix)',
+  framed.raw.trim().startsWith('{"') && framed.data.reply === 'Framing check.',
   JSON.stringify(framed.raw.slice(0, 24)),
 );
+
+// 16) Slow upstream is cut off by the budget so the gateway never times out
+process.env.GEMINI_TIMEOUT_MS = '400';
+mockGeminiHandler = () => ({ status: 503, body: { error: { code: 503, message: 'slow' } } });
+const realFetchSlow = globalThis.fetch;
+globalThis.fetch = async (url, options) => {
+  if (String(url).includes('generativelanguage')) {
+    await new Promise((resolve, reject) => {
+      const t = setTimeout(resolve, 5000);
+      options?.signal?.addEventListener('abort', () => {
+        clearTimeout(t);
+        reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+      });
+    });
+  }
+  return new Response('{}', { status: 200 });
+};
+const slowStart = Date.now();
+({ status } = await call(conversation));
+const slowMs = Date.now() - slowStart;
+globalThis.fetch = realFetchSlow;
+check('Slow Gemini → aborted within budget → 502 retryable', status === 502 && slowMs < 2000, `${slowMs} ms`);
+delete process.env.GEMINI_TIMEOUT_MS;
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
