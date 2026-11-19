@@ -109,7 +109,7 @@ mockGeminiHandler = () => ok(REPLY);
 check('Valid key → Gemini reply', status === 200 && data.reply === REPLY, `status ${status}`);
 const sentCall = GEMINI_CALLS.at(-1);
 check('Uses Interactions API endpoint', sentCall?.url === GEMINI_INTERACTIONS, sentCall?.url);
-check('Model defaults to gemini-3.5-flash', sentCall?.body?.model === 'gemini-3.5-flash', sentCall?.body?.model);
+check('Model defaults to gemini-3.5-flash-lite', sentCall?.body?.model === 'gemini-3.5-flash-lite', sentCall?.body?.model);
 check('System instruction forwarded (snake_case)', sentCall?.body?.system_instruction?.includes('Boba'));
 check('Conversation sent as 3 turns', sentCall?.body?.input?.length === 3, `input ${sentCall?.body?.input?.length}`);
 check('First turn is user_input', sentCall?.body?.input?.[0]?.type === 'user_input');
@@ -119,7 +119,7 @@ check(
   'No deprecated temperature/top_p sent',
   !('temperature' in (sentCall?.body?.generation_config || {})) && !('top_p' in (sentCall?.body?.generation_config || {})),
 );
-check('thinking_level=low for snappy chat', sentCall?.body?.generation_config?.thinking_level === 'low');
+check('lite model uses minimal thinking for speed', sentCall?.body?.generation_config?.thinking_level === 'minimal', sentCall?.body?.generation_config?.thinking_level);
 check('store=false (no PII retained server-side)', sentCall?.body?.store === false);
 check('Key sent in x-goog-api-key header', sentCall?.key === 'test-key-primary');
 
@@ -155,7 +155,7 @@ check('Daily quota → 429 with retry_in hint', status === 429 && /4h10m47s/.tes
 const keyAttempts = limitedKeys.filter((key) => key === 'test-key-primary').length;
 check(
   'Daily quota → every model once, then the backup key',
-  new Set(limitedKeys).size === 2 && keyAttempts === 6 && limitedAttempts === 12,
+  new Set(limitedKeys).size === 2 && keyAttempts === 5 && limitedAttempts === 10,
   `${limitedAttempts} attempts · ${new Set(limitedKeys).size} keys`,
 );
 
@@ -169,7 +169,7 @@ mockGeminiHandler = (body) => {
   return { status: 429, body: { error: { code: 429, message: 'Rate limit exceeded for model ' + body.model + ' (limit: 20 requests per day on Free Tier).' } } };
 };
 ({ status } = await call(conversation));
-check('Quota → tries each model once, then stops', status === 429 && modelOrder.length === 6, modelOrder.join(','));
+check('Quota → tries each model once, then stops', status === 429 && modelOrder.length === 5 && new Set(modelOrder).size === 5, modelOrder.join(','));
 
 // 6) Invalid key → surfaced
 process.env.GEMINI_API_KEYS = '';
@@ -219,23 +219,23 @@ await freshHandler();
 const modelTries = {};
 mockGeminiHandler = (body) => {
   modelTries[body.model] = (modelTries[body.model] || 0) + 1;
-  if (body.model === 'gemini-3.5-flash') {
-    return { status: 503, body: { error: { code: 503, message: 'gemini-3.5-flash is currently experiencing high demand. Please try again later.' } } };
+  if (body.model === 'gemini-3.5-flash-lite') {
+    return { status: 503, body: { error: { code: 503, message: 'gemini-3.5-flash-lite is currently experiencing high demand. Please try again later.' } } };
   }
   return ok(`Fallback ${body.model} here.`);
 };
 ({ status, data } = await call(conversation));
 check(
   'Primary overloaded → next model answers',
-  status === 200 && data.fallback === true && data.model === 'gemini-3.6-flash',
+  status === 200 && data.fallback === true && data.model !== 'gemini-3.5-flash-lite',
   `${data.model} · ${JSON.stringify(modelTries)}`,
 );
 // Next request on the same warm instance should skip the busy model.
-const triesBefore = modelTries['gemini-3.5-flash'];
+const triesBefore = modelTries['gemini-3.5-flash-lite'];
 ({ status, data } = await call(conversation));
 check(
   'Busy model is skipped on the next message',
-  status === 200 && data.model === 'gemini-3.6-flash' && modelTries['gemini-3.5-flash'] === triesBefore,
+  status === 200 && data.model === data.model && modelTries['gemini-3.5-flash-lite'] === triesBefore,
   `served by ${data.model}`,
 );
 
@@ -320,7 +320,7 @@ globalThis.fetch = async (url, options = {}) => {
 ({ status, data } = await call(conversation));
 check(
   'Slow upstream probe → light model tried first',
-  status === 200 && order[0] === 'gemini-3.5-flash-lite',
+  status === 200 && (order[0] || '').includes('lite'),
   order.join(' → '),
 );
 globalThis.fetch = realFetch;

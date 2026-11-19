@@ -20,16 +20,15 @@
  * answers 200 { configured: false } and the client falls back to mock replies.
  */
 
-const FN_VERSION = '2026-11-19T21:15';
+const FN_VERSION = '2026-11-19T21:25';
 // Fast, capable default. Free tier limits are per model, so the chain below is
 // what keeps chat working when one model is busy or out of quota.
-const DEFAULT_MODEL = 'gemini-3.5-flash';
+const DEFAULT_MODEL = 'gemini-3.5-flash-lite';
 const DEFAULT_FALLBACKS = [
-  'gemini-3.6-flash',
-  'gemini-3.8-flash',
-  'gemini-3.5-flash-lite',
-  'gemini-2.5-flash',
   'gemini-2.5-flash-lite',
+  'gemini-3.5-flash',
+  'gemini-3.6-flash',
+  'gemini-2.5-flash',
 ].join(',');
 const DEFAULT_THINKING_LEVEL = process.env.GEMINI_THINKING_LEVEL || 'low';
 const OVERLOAD_PATTERN = /high demand|overloaded|unavailable|temporarily|try again later|resource_exhausted|no longer available/i;
@@ -90,6 +89,7 @@ function buildInteractionRequest(body = {}, modelOverride) {
       system_instruction: String(body.systemPrompt || '').slice(0, 8000),
       generation_config: {
         max_output_tokens: 512,
+          // Lite models are fast with minimal thinking; Flash models use low.
         thinking_level: /lite/.test(model) ? 'minimal' : DEFAULT_THINKING_LEVEL,
       },
       store: false,
@@ -287,7 +287,10 @@ async function handle(request) {
   // Stay well under Netlify's ~30s gateway timeout, and keep replies snappy.
   // Cold calls to Gemini 3.8 can take 15-25s from some regions. Observe it rather
   // than abort: Netlify's ~30s gateway limit still applies (see GEMINI_TIMEOUT_MS).
-  const BUDGET_MS = Number(process.env.GEMINI_TIMEOUT_MS || 26_000);
+  const BUDGET_MS = Number(process.env.GEMINI_TIMEOUT_MS || 24_000);
+  // A single model may only use part of the budget, so a slow one cannot starve
+  // the next model in the chain.
+  const PER_MODEL_MS = Number(process.env.GEMINI_PER_MODEL_MS || 11_000);
   const startedAt = Date.now();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), BUDGET_MS);
@@ -308,10 +311,15 @@ async function handle(request) {
         const attempts = rateLimited ? [0] : [0, 500]; // usually one try + one short retry
         for (const delay of attempts) {
           if (delay) await sleep(delay + Math.random() * 250);
-          if (Date.now() >= deadline) break outer;
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) break outer;
+          const modelController = new AbortController();
+          const onAbort = () => modelController.abort();
+          controller.signal.addEventListener('abort', onAbort, { once: true });
+          const perModelTimer = setTimeout(() => modelController.abort(), Math.min(PER_MODEL_MS, remaining));
           let result;
           try {
-            result = await callGemini({ key, model, payload, signal: controller.signal });
+            result = await callGemini({ key, model, payload, signal: modelController.signal });
           } catch (error) {
             lastError = {
               status: 502,
