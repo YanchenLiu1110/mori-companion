@@ -1,7 +1,7 @@
 # 手把手：把 Google AI Studio 的 Gemini 接入 MORI
 
 > 你只需要做 **3 件事**：拿 API Key → 在 Netlify 填变量 → 触发部署。
-> 代码我已经全部写好并测试通过（代理服务 27 项 + 浏览器端到端 12 项全部通过）。
+> 代码我已经全部写好并测试通过（代理服务 28 项 + 浏览器端到端 12 项全部通过）。
 
 ```
 浏览器聊天框
@@ -99,6 +99,7 @@ Google Gemini
 | 控制台出现 `AI unavailable (429)` | 免费额度用完了 | 等 1 分钟再试；或加 `GEMINI_API_KEYS` 配第二个 Key 自动轮换 |
 | 控制台出现 `AI unreachable` / 超时 | 区域网络不通 | 确认 Netlify 函数区域不是受限地区；可设置 `GEMINI_FALLBACK_MODELS` 备用模型 |
 | 返回 `gemini-3.8-flash is currently experiencing high demand`（502） | Google 服务端短时过载 | 函数会自动重试 2 次并切到备用模型；持续出现说明多个模型同时过载，等 1–2 分钟即可，期间页面自动用 mock 回复兜底 |
+| 返回 HTML `Inactivity Timeout`（504） | Netlify 网关空闲超时（>30 秒无数据） | 已加心跳保活：函数在等待 Gemini 期间每 5 秒发送一个空白字符，JSON 在结束时追加。重新部署即可 |
 | 回复被拦截（危险内容） | Gemini 安全策略 | 已配置 `BLOCK_MEDIUM_AND_ABOVE`，正常学习对话不会触发；被拦截时会自动用 mock 回复 |
 
 想自己确认服务端状态，可以在浏览器控制台运行：

@@ -166,31 +166,64 @@ async function callGemini({ key, model, payload, signal }) {
   };
 }
 
-export default async function handler(request) {
+/**
+ * Netlify's gateway drops idle connections after ~30s. Gemini 3.x can think for
+ * a while (or the proxy retries), so the response stream starts with a harmless
+ * whitespace keep-alive; the JSON body is appended as soon as it is ready.
+ * JSON.parse ignores surrounding whitespace.
+ */
+function streamWithKeepAlive(promise, heartbeat) {
+  const encoder = new TextEncoder();
+  let timer = null;
+  return new ReadableStream({
+    start(controller) {
+      if (heartbeat) {
+        controller.enqueue(encoder.encode(' '));
+        timer = setInterval(() => controller.enqueue(encoder.encode(' ')), 5_000);
+      }
+      promise
+        .then(({ status, body }) => {
+          clearInterval(timer);
+          controller.enqueue(encoder.encode(JSON.stringify(body)));
+          controller.close();
+          return status;
+        })
+        .catch(() => {
+          clearInterval(timer);
+          controller.close();
+        });
+    },
+    cancel() {
+      clearInterval(timer);
+    },
+  });
+}
+
+async function handle(request) {
   if (request.method !== 'POST') {
-    return json(405, { error: 'Method not allowed' });
+    return { status: 405, body: { error: 'Method not allowed' } };
   }
 
   let body;
   try {
     body = await request.json();
   } catch {
-    return json(400, { error: 'Invalid JSON body.' });
+    return { status: 400, body: { error: 'Invalid JSON body.' } };
   }
 
   const keys = getKeys();
   if (!keys.length) {
     // 200 (not an error) so the browser console stays clean before the key is set.
-    return json(200, { configured: false, reply: null });
+    return { status: 200, body: { configured: false, reply: null } };
   }
 
   if (isRateLimited()) {
-    return json(429, { error: 'Too many requests. Breathe for a minute.' });
+    return { status: 429, body: { error: 'Too many requests. Breathe for a minute.' } };
   }
 
   const { model, payload } = buildInteractionRequest(body, primaryModel());
   if (!payload.input.length) {
-    return json(400, { error: 'A user message is required.' });
+    return { status: 400, body: { error: 'A user message is required.' } };
   }
 
   const controller = new AbortController();
@@ -219,7 +252,7 @@ export default async function handler(request) {
           if (result.ok) {
             const reply = extractReply(result.data);
             if (reply) {
-              return json(200, { reply, model, provider: 'gemini', fallback: model !== primaryModel() });
+              return { status: 200, heartbeat: true, body: { reply, model, provider: 'gemini', fallback: model !== primaryModel() } };
             }
             lastError = { status: 502, message: 'The companion had nothing to say.', model };
             break;
@@ -247,9 +280,22 @@ export default async function handler(request) {
   // 4xx means the client should not retry; everything else maps to 502 so the
   // UI quietly falls back to mock replies instead of showing an error.
   const clientStatus = lastError?.status >= 400 && lastError.status < 500 ? lastError.status : 502;
-  return json(clientStatus, {
+  return { status: clientStatus, body: {
     error: lastError?.message || 'Gemini request failed.',
     model: lastError?.model || primaryModel(),
     retryable: clientStatus === 502 || clientStatus === 429,
+  } };
+}
+
+export default async function handler(request) {
+  const pending = handle(request);
+  // Keep-alive whitespace only while Gemini is being called (chat POSTs).
+  const wantsHeartbeat = request.method === 'POST' && String(request.url).includes('/companion');
+  return new Response(streamWithKeepAlive(pending, wantsHeartbeat), {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+    },
   });
 }

@@ -89,7 +89,7 @@ Google Gemini
 
 - The API key is read from Netlify environment variables and **never reaches the browser**.
 - Each request carries the companion persona, the user's live study data (level, streak, minutes today, mood, days away) and the last few chat turns, so replies are personal and stay in context.
-- Resilience: overload (`503 high demand`) is retried twice with short back-off, then the proxy tries the fallback models before giving up. Missing key, invalid key, no user turn and empty candidates fall back to the built-in mock replies — a live demo never breaks.
+- Resilience: overload (`503 high demand`) is retried twice with short back-off, then the proxy tries the fallback models before giving up. Gemini 3.8 can take >30 s under load, so the response stream sends keep-alive whitespace (JSON body follows) to avoid Netlify's gateway inactivity timeout. Missing key, invalid key, no user turn and empty candidates fall back to the built-in mock replies — a live demo never breaks.
 - The chat header shows **Gemini · live** when the proxy answers, or **Preview mode** when it falls back to mock.
 
 ### Enabling it (full walkthrough: [AI-SETUP.md](AI-SETUP.md))
@@ -124,7 +124,7 @@ Without a key locally, chat simply uses mock replies — everything else works.
 
 ```bash
 npm install playwright-core --no-save   # only needed for the browser test
-npm run test:ai    # 27 proxy checks against a mocked Gemini Interactions endpoint
+npm run test:ai    # 28 proxy checks against a mocked Gemini Interactions endpoint
 npm run test:e2e   # boots mock servers + Chrome, verifies live + fallback paths
 ```
 
