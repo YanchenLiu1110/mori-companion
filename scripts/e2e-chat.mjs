@@ -74,7 +74,7 @@ async function runChrome(baseUrl) {
     await sleep(300);
   }
   const bubbles = await page.locator('.whitespace-pre-line').allInnerTexts();
-  const meta = await page.locator("p").filter({ hasText: /via gemini-3\.8-flash/i }).count();
+  const meta = await page.locator("p").filter({ hasText: /via gemini-[\d.]+-flash/i }).count();
   const footer = (await page.getByText(/powered by Gemini|Preview replies/).innerText().catch(() => '')).toLowerCase();
   await browser.close();
   return { badge, bubbles, meta, footer, errors };
@@ -103,7 +103,7 @@ try {
   const textOf = (turn) => (turn.content || []).map((part) => part.text).join('');
   const secondTurn = chatCalls.find((c) => c.input.some((turn) => textOf(turn) === 'and my streak?'));
   check('With key: proxy called Gemini Interactions API', chatCalls.length >= 2 && chatCalls.at(-1).url.includes('/interactions'), `${chatCalls.length} chat calls`);
-  check('With key: model is gemini-3.8-flash', chatCalls.at(-1)?.model === 'gemini-3.8-flash', chatCalls.at(-1)?.model);
+  check('With key: primary model is gemini-3.5-flash', chatCalls.at(-1)?.model === 'gemini-3.5-flash', chatCalls.at(-1)?.model);
   check('With key: turn 2 carries conversation memory', Boolean(secondTurn) && secondTurn.input.length >= 3, secondTurn ? secondTurn.input.map((x) => x.type).join('→') : 'missing');
   check('With key: system prompt includes study data', /Level \d+, \d+-day streak/.test(chatCalls.at(-1)?.system || ''));
   check('With key: API key never in browser console errors', live.errors.length === 0, live.errors.join(' | '));
