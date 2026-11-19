@@ -15,7 +15,7 @@
 | **Onboarding** | Nickname + one of three illustrated companions: Boba the bear, Fenn the deer, Miso the fox. |
 | **Today** | XP bar, level, streak, daily goal, mood, weekly rhythm, today's sessions, and a personalized note from the companion. |
 | **Focus room** | 25/45/60-minute and custom Pomodoro timer, 5/10/15-minute breaks, animated study/rest poses, pause/resume, early finish with banked minutes, and completion celebration. |
-| **Companion** | Full character stage, growth timeline, unlockable abilities, mood states, and a scene-aware chat interface. |
+| **Companion** | Full character stage, growth timeline, unlockable abilities, mood states, and a Gemini-powered chat with conversation memory and study-data context. |
 | **Insights** | Week/month filters, daily bar chart, time-of-day focus pattern, cumulative growth curve, focus score, and data-aware AI-style recommendations. |
 | **MORI Plus** | Free accounts cap at **Level 5**. A simulated ¥18/month paywall unlocks every future stage and triggers a level-up celebration. |
 | **Share card** | Generates a real PNG growth card with the companion, level, stage, streak, and stats. Supports native share when available and download everywhere else. |
@@ -73,85 +73,60 @@ The companion page combines the full character stage, a data-driven growth timel
 
 ![Companion page](docs/companion.png)
 
-## Replace the mock AI with a real LLM
+## Companion AI — Gemini via Netlify Functions
 
-The mock lives in [`src/lib/companionAI.js`](src/lib/companionAI.js) inside `generateCompanionReply(userMessage, studyData)`. It already:
+Chat is powered by **Gemini 2.5 Flash** through a serverless proxy:
 
-- reads the user's level, streak, minutes today, goal, mood, and days away;
-- detects intent in the message (tired, stuck, overwhelmed, wins, greetings, and more);
-- replies with one of 20+ personality-consistent lines;
-- simulates typing latency.
-
-### Step 1 — create a server-side proxy
-
-**Never put a provider API key in a `VITE_*` variable.** Those values are shipped to the browser. Create a tiny server endpoint (Vercel/Netlify/Express) that holds the key.
-
-Contract expected by the prototype:
-
-```http
-POST /api/companion
-Content-Type: application/json
-
-{
-  "systemPrompt": "...",
-  "messages": [{ "role": "user", "content": "I feel stuck today" }],
-  "context": { "nickname": "Mira", "level": 5, "streak": 9, "...": "..." }
-}
+```text
+Browser (chat UI)
+   │  POST /.netlify/functions/companion
+   ▼
+Netlify Function  netlify/functions/companion.js   ← GEMINI_API_KEY lives only here
+   │  POST generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent
+   ▼
+Google Gemini
 ```
 
-Respond with:
+- The API key is read from Netlify environment variables and **never reaches the browser**.
+- Each request carries the companion persona, the user's live study data (level, streak, minutes today, mood, days away) and the last few chat turns, so replies are personal and stay in context.
+- If the key is missing, invalid, the region is blocked, the quota is hit, or Gemini returns an empty candidate, the UI quietly falls back to the built-in mock replies — a live demo never breaks.
+- The chat header shows **Gemini · live** when the proxy answers, or **Preview mode** when it falls back to mock.
 
-```json
-{ "reply": "Stuck usually means the next step is too big..." }
-```
+### Enabling it (full walkthrough: [AI-SETUP.md](AI-SETUP.md))
 
-### Step 2 — point the app at your proxy
+1. Create a key at <https://aistudio.google.com/apikey>.
+2. In Netlify: **Site configuration → Environment variables → Add a variable** → key `GEMINI_API_KEY`, value your key.
+3. Push to GitHub (triggers a deploy) or **Deploys → Trigger deploy → Deploy site**.
+4. Open the Companion page — the chat header should read **Gemini · live**.
 
-Copy `.env.example` to `.env` and set:
+Optional server variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `GEMINI_API_KEY` | Primary key (required). |
+| `GEMINI_API_KEYS` | Comma-separated extra keys, rotated automatically on 429/403. |
+| `GEMINI_MODEL` | Override the model (default `gemini-2.5-flash`). |
+
+### Local development
+
+`npm run dev` serves the UI on :5173; chat needs the function running. Use the Netlify CLI:
 
 ```bash
-VITE_MORI_LLM_ENDPOINT=https://your-domain.com/api/companion
+npx netlify-cli dev            # builds functions + serves the site with a proxy
+npx netlify-cli env:get GEMINI_API_KEY   # or add to .env for local use (never commit)
 ```
 
-Or use a relative path with a Vite dev proxy:
+Without a key locally, chat simply uses mock replies — everything else works.
 
-```js
-// vite.config.js
-server: {
-  proxy: {
-    '/api': 'http://localhost:3001',
-  },
-}
+### Testing the integration without a real key
+
+```bash
+npm install playwright-core --no-save   # only needed for the browser test
+npm run test:ai    # 14 proxy checks against a mocked Gemini endpoint
+npm run test:e2e   # boots mock servers + Chrome, verifies live + fallback paths
 ```
 
-If the endpoint is configured but fails or times out, the app automatically falls back to the mock reply — a useful safety net during a live demo.
-
-### Example proxy (Node / Vercel style, OpenAI)
-
-```js
-// api/companion.js — SERVER SIDE ONLY
-export default async function handler(req, res) {
-  const { systemPrompt, messages } = req.body;
-
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-    },
-    body: JSON.stringify({
-      model: 'gpt-4o-mini',
-      temperature: 0.8,
-      messages: [{ role: 'system', content: systemPrompt }, ...messages],
-    }),
-  });
-
-  const data = await response.json();
-  res.status(200).json({ reply: data.choices[0].message.content });
-}
-```
-
-The same seam works with Claude, Gemini, or a self-hosted model. The existing `buildSystemPrompt(context)` function is a reasonable starting personality: warm, specific, 1–3 sentences, never shaming missed days, and never using corporate productivity language.
+`VITE_MORI_LLM_ENDPOINT` can point the UI at any other proxy exposing the same contract (`POST { systemPrompt, userMessage, messages } → { reply }`), e.g. OpenAI or Claude behind your own endpoint.
 
 ## Data model and persistence
 
@@ -230,6 +205,11 @@ mori-companion/
 │   ├── App.jsx
 │   ├── main.jsx
 │   └── index.css
+├── netlify/
+│   └── functions/companion.js    # Gemini proxy (server-side key)
+├── scripts/                      # AI proxy tests + local mock servers
+├── netlify.toml                  # Build, functions, SPA fallback
+├── AI-SETUP.md                   # Step-by-step Gemini + Netlify guide
 ├── docs/                         # Screenshots used in this README
 ├── .env.example
 └── README.md
@@ -246,7 +226,7 @@ mori-companion/
 
 ## Known limitations / next steps
 
-- AI replies are mocked until you provide a server-side LLM proxy.
+- AI chat runs on Gemini once `GEMINI_API_KEY` is set in Netlify; until then the UI uses mock replies.
 - Payment is simulated; no card is collected and no real charge is made.
 - Persistence is local-only. A production build needs auth, a database, cross-device sync, and server-side entitlement checks.
 - The tier currently uses a single monthly plan. Real pricing should test monthly vs. annual, regional pricing, and a free trial.

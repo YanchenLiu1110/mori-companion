@@ -12,7 +12,8 @@ import {
 } from 'lucide-react';
 import { useMori } from '../context/MoriContext.jsx';
 import { EVENTS, track, trackOnce } from '../lib/analytics.js';
-import { generateCompanionReply } from '../lib/companionAI.js';
+import { AI_ENGINE, generateCompanionReply, lastReplySource } from '../lib/companionAI.js';
+import { AI_CONFIGURED, checkCompanionAI } from '../lib/aiStatus.js';
 import { formatDuration, formatLongDate, formatShortDate } from '../lib/date.js';
 import { buildMilestoneStats, buildTimeline } from '../lib/progression.js';
 import { cn } from '../lib/utils.js';
@@ -36,6 +37,7 @@ export function CompanionPage() {
   const [typing, setTyping] = useState(false);
   const [celebrating, setCelebrating] = useState(false);
   const sendingRef = useRef(false);
+  const [aiState, setAiState] = useState(null);
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -60,6 +62,16 @@ export function CompanionPage() {
       level: progression.level,
     });
   }, [chat.length, progression.level]);
+
+  useEffect(() => {
+    let active = true;
+    checkCompanionAI().then((result) => {
+      if (active) setAiState(result.state);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     const node = scrollRef.current;
@@ -91,15 +103,22 @@ export function CompanionPage() {
         totalMinutes: derived?.totalMinutes,
         daysSinceLastStudy: derived?.daysSinceLastStudy,
         mood: derived?.mood?.key,
+        // Recent turns give Gemini conversation memory. The chrome welcome
+        // bubble is skipped so the model does not re-greet every time.
+        history: chat
+          .filter((item) => item.text && !String(item.meta || '').startsWith('Day '))
+          .slice(-8)
+          .map((item) => ({ role: item.role === 'assistant' ? 'assistant' : 'user', content: item.text })),
       });
       appendChat({
         role: 'assistant',
         text: reply,
-        meta: `${companion?.name} · here with you`,
+        meta: `${companion?.name} · ${lastReplySource() === 'gemini' ? 'via Gemini' : 'here with you'}`,
       });
       track(EVENTS.COMPANION_REPLIED, {
         reply_length: reply.length,
         level: progression.level,
+        engine: lastReplySource(),
       });
       if (/proud|bloom|grew|growth|root|garden|forest/i.test(reply)) {
         setCelebrating(true);
@@ -177,6 +196,7 @@ export function CompanionPage() {
           onSubmit={handleSubmit}
           celebrating={celebrating}
           progression={progression}
+          aiState={aiState}
         />
       </section>
 
@@ -366,6 +386,7 @@ function ChatCard({
   onSubmit,
   celebrating,
   progression,
+  aiState,
 }) {
   return (
     <div className="card flex h-full min-h-[590px] flex-col overflow-hidden">
@@ -383,8 +404,22 @@ function ChatCard({
             here with you · replies in a moment
           </p>
         </div>
-        <span className="hidden rounded-full border border-line bg-white/45 px-2.5 py-1 text-[0.5rem] font-extrabold uppercase tracking-[0.1em] text-forest-700/40 sm:block">
-          mock · LLM-ready
+        <span
+          title={
+            aiState === AI_CONFIGURED
+              ? `${AI_ENGINE.model} via Netlify function · key stays on the server`
+              : 'Gemini not configured yet — using built-in preview replies'
+          }
+          className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[0.5rem] font-extrabold uppercase tracking-[0.1em] ${
+            aiState === AI_CONFIGURED
+              ? 'border-forest-200 bg-forest-50 text-forest-700'
+              : 'border-line bg-white/45 text-forest-700/40'
+          }`}
+        >
+          <span
+            className={`h-1 w-1 rounded-full ${aiState === AI_CONFIGURED ? 'bg-forest-500' : 'bg-forest-800/25'}`}
+          />
+          {aiState === AI_CONFIGURED ? `${AI_ENGINE.label} · live` : 'Preview mode'}
         </span>
       </div>
 
@@ -448,7 +483,9 @@ function ChatCard({
           </button>
         </form>
         <p className="mt-2 text-center text-[0.52rem] font-bold text-forest-800/25">
-          Mock companion replies · ready for a real LLM in production
+          {aiState === AI_CONFIGURED
+            ? `Personalized with your study data · powered by ${AI_ENGINE.model}`
+            : 'Preview replies · Gemini AI activates once the API key is configured'}
         </p>
       </div>
     </div>

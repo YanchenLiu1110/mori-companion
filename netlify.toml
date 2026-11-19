@@ -1,0 +1,27 @@
+# Netlify build + Gemini AI function for the MORI prototype.
+# The API key lives in Netlify environment variables (GEMINI_API_KEY),
+# never in this file and never in the browser bundle.
+
+[build]
+  command = "npm run build"
+  publish = "dist"
+  functions = "netlify/functions"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+[functions]
+  node_bundler = "esbuild"
+
+# The React app uses hash routes (#/home), so a catch-all fallback is enough
+# for deep links. Keep it last so /assets and functions are never shadowed.
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"

@@ -3,11 +3,13 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "MORI — an AI companion that grows while you study.",
+  "description": "MORI \u2014 an AI companion that grows while you study.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:ai": "node scripts/test-companion-function.mjs",
+    "test:e2e": "node scripts/e2e-chat.mjs"
   },
   "dependencies": {
     "@fontsource-variable/fraunces": "^5.3.0",

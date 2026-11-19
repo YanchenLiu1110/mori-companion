@@ -1,12 +1,13 @@
 node_modules/
 dist/
+.netlify/
 .env
 .env.local
+.env.*.local
 .DS_Store
 .npm-cache/
 .npm-logs/
 shots/
-mori-shots.mjs
-mori-debug.mjs
-mori-tests.mjs
+mori-*.mjs
 *.log
+ws_ccw_*

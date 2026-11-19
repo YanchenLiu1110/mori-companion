@@ -1,12 +1,32 @@
 /**
- * Companion AI — mock implementation with a real LLM seam.
+ * Companion AI — Gemini (Google AI Studio) with a graceful mock fallback.
  *
- * Set VITE_MORI_LLM_ENDPOINT to a small server proxy that accepts:
- *   POST { systemPrompt, messages, context } → { reply: string }
+ * Flow:  chat UI → POST /.netlify/functions/companion → Gemini generateContent
+ * The Gemini key lives ONLY in Netlify environment variables (GEMINI_API_KEY).
+ * It is never bundled into the browser.
  *
- * Never ship a provider API key in the browser. In production, proxy this
- * request through your own backend (OpenAI, Anthropic, or another provider).
+ * Configuration:
+ *   - Production (Netlify): placeholder below resolves automatically.
+ *   - Override (local/staging): VITE_MORI_LLM_ENDPOINT=/api/companion
+ *   - If the API is not configured, unreachable, rate-limited, or returns an
+ *     empty candidate, the companion replies from the local mock pool instead.
+ *     (`lastReplySource` records which path produced the latest reply.)
  */
+
+const FUNCTION_ENDPOINT = '/.netlify/functions/companion';
+const ENDPOINT = (import.meta.env.VITE_MORI_LLM_ENDPOINT || '').trim() || FUNCTION_ENDPOINT;
+const REQUEST_TIMEOUT_MS = 18_000;
+
+export const AI_ENGINE = {
+  model: 'Gemini 2.5 Flash',
+  label: 'Gemini',
+};
+
+let replySource = 'mock';
+
+export function lastReplySource() {
+  return replySource;
+}
 
 const MOCK_REPLIES = {
   tired: [
@@ -64,33 +84,46 @@ const MOCK_REPLIES = {
 export async function generateCompanionReply(userMessage, studyData = {}) {
   const message = String(userMessage || '').trim();
   const context = buildStudyContext(studyData);
+  const history = Array.isArray(studyData.history) ? studyData.history : [];
+  const messages = [...history, { role: 'user', content: message }]
+    .filter((item) => item && typeof item.content === 'string' && item.content.trim())
+    .slice(-8)
+    .map((item) => ({
+      role: item.role === 'assistant' ? 'assistant' : 'user',
+      content: item.content.trim().slice(0, 2000),
+    }));
 
-  // LLM API: replace this mock with OpenAI / Claude through the server proxy.
-  const endpoint = import.meta.env.VITE_MORI_LLM_ENDPOINT;
-  if (endpoint) {
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 12_000);
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: controller.signal,
-        body: JSON.stringify({
-          systemPrompt: buildSystemPrompt(context),
-          messages: [{ role: 'user', content: message }],
-          context,
-        }),
-      });
-      clearTimeout(timeout);
-      if (response.ok) {
-        const data = await response.json();
-        if (typeof data.reply === 'string' && data.reply.trim()) {
-          return data.reply.trim();
-        }
-      }
-    } catch (error) {
-      console.warn('[MORI] LLM endpoint unavailable — using mock companion reply.', error);
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const response = await fetch(ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        systemPrompt: buildSystemPrompt(context),
+        userMessage: message,
+        messages,
+        context,
+      }),
+    });
+    clearTimeout(timeout);
+
+    const data = await response.json().catch(() => ({}));
+    if (response.ok && typeof data.reply === 'string' && data.reply.trim()) {
+      replySource = 'gemini';
+      return data.reply.trim();
     }
+    if (data.configured === false) {
+      // Key not configured yet — expected during setup, stay quiet.
+      replySource = 'mock';
+    } else {
+      replySource = 'mock';
+      console.warn(`[MORI] AI unavailable (${response.status}); using mock reply.`, data?.error || '');
+    }
+  } catch (error) {
+    replySource = 'mock';
+    console.warn('[MORI] AI request failed; using mock reply.', error?.message || error);
   }
 
   await new Promise((resolve) => setTimeout(resolve, 620 + Math.random() * 520));
@@ -98,14 +131,22 @@ export async function generateCompanionReply(userMessage, studyData = {}) {
 }
 
 export function buildSystemPrompt(context) {
-  return [
-    `You are ${context.companion}, a warm, playful companion in the MORI study app.`,
-    `You are speaking with ${context.nickname}, who is Level ${context.level} with a ${context.streak}-day streak.`,
-    `Today they have studied ${context.minutesToday} of ${context.dailyGoal} minutes.`,
-    'Reply in 1–3 short conversational sentences. Be specific to their study data when useful.',
-    'Never shame them for missed days, never lecture, never use corporate productivity language.',
-    'You may ask one gentle question. Do not use emojis more than once or markdown formatting.',
-  ].join(' ');
+  const lines = [
+    `You are ${context.companion}, a warm, playful virtual companion inside the MORI study app.`,
+    `You are talking with ${context.nickname}.`,
+    `Their study data right now: Level ${context.level}, ${context.streak}-day streak, ${context.minutesToday} of ${context.dailyGoal} focused minutes today, ${Math.round(context.totalMinutes)} total minutes together, overall mood "${context.mood}".`,
+  ];
+  if (context.daysSinceLastStudy !== null && context.daysSinceLastStudy !== undefined && context.daysSinceLastStudy >= 3) {
+    lines.push(`They have been away for ${context.daysSinceLastStudy} days. Welcome them back gently. Never mention the gap as a failure or ask them to catch up.`);
+  }
+  lines.push(
+    'Reply in 1-3 short conversational sentences, in the same language the user writes in (English by default).',
+    'Use their real study data when it makes the reply feel personal, but do not list numbers mechanically.',
+    'You may ask at most one gentle question.',
+    'Never shame, scold, lecture, or use corporate productivity jargon. No markdown, no bullet lists, at most one emoji.',
+    'Never mention that you are a language model. You are simply their companion.',
+  );
+  return lines.join(' ');
 }
 
 function buildStudyContext(studyData) {
