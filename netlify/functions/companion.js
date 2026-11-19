@@ -178,6 +178,7 @@ async function probeUpstreamLatency(key) {
  */
 function orderModelsForLatency(chain) {
   if (preflight === null || preflight < 1_500) return chain;
+  // Slow upstream: try the fastest models first as a rescue, then the normal chain.
   const light = ['gemini-3.5-flash-lite', 'gemini-2.5-flash-lite'];
   return [...light.filter((model) => !chain.includes(model)), ...chain];
 }
@@ -310,6 +311,8 @@ async function handle(request) {
   const clientStatus = lastError?.status >= 400 && lastError.status < 500 && !timedOut ? lastError.status : 502;
   return { status: clientStatus, body: {
     fn_version: FN_VERSION,
+    elapsed_ms: Date.now() - startedAt,
+    preflight_ms: preflight,
     error: lastError?.message || 'Gemini request failed.',
     model: lastError?.model || primaryModel(),
     retryable: clientStatus === 502 || clientStatus === 429,
