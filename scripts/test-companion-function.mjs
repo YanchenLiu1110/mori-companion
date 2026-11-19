@@ -11,12 +11,26 @@
  */
 const GEMINI_INTERACTIONS = 'https://generativelanguage.googleapis.com/v1beta/interactions';
 const GEMINI_CALLS = [];
+const PROBE_STATE = { slowProbe: false };
 let mockGeminiHandler = null;
 
 // Intercept the outbound Gemini request.
 const realFetch = globalThis.fetch;
 globalThis.fetch = async (url, options = {}) => {
   if (String(url).startsWith('https://generativelanguage.googleapis.com/')) {
+    // Reachability probe (GET models) — no model call, no quota.
+    if (!options.method || options.method === 'GET') {
+      if (PROBE_STATE.slowProbe) {
+        await new Promise((resolve, reject) => {
+          const t = setTimeout(resolve, 5000);
+          options?.signal?.addEventListener('abort', () => {
+            clearTimeout(t);
+            reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+          }, { once: true });
+        });
+      }
+      return new Response('{"models":[]}', { status: 200 });
+    }
     const body = JSON.parse(options.body || '{}');
     GEMINI_CALLS.push({ url: String(url), key: options.headers?.['x-goog-api-key'], body });
     const result = mockGeminiHandler(body);
@@ -25,7 +39,8 @@ globalThis.fetch = async (url, options = {}) => {
   return realFetch(url, options);
 };
 
-const { default: handler } = await import('../netlify/functions/companion.js');
+const moduleUrl = new URL(`../netlify/functions/companion.js?v=${Date.now()}`, import.meta.url);
+let { default: handler } = await import(moduleUrl.href);
 
 function makeRequest(body, method = 'POST') {
   return new Request('https://example.netlify.app/.netlify/functions/companion', {
@@ -233,10 +248,11 @@ check(
 
 // 16) Slow upstream is cut off by the budget so the gateway never times out
 process.env.GEMINI_TIMEOUT_MS = '400';
-mockGeminiHandler = () => ({ status: 503, body: { error: { code: 503, message: 'slow' } } });
 const realFetchSlow = globalThis.fetch;
+const hadProbe = PROBE_STATE.slowProbe;
+PROBE_STATE.slowProbe = false; // made the warm instance look healthy (fast probe)
 globalThis.fetch = async (url, options) => {
-  if (String(url).includes('generativelanguage')) {
+  if (String(url).includes('generativelanguage') && options?.method === 'POST') {
     await new Promise((resolve, reject) => {
       const t = setTimeout(resolve, 5000);
       options?.signal?.addEventListener('abort', () => {
@@ -251,8 +267,33 @@ const slowStart = Date.now();
 ({ status } = await call(conversation));
 const slowMs = Date.now() - slowStart;
 globalThis.fetch = realFetchSlow;
+PROBE_STATE.slowProbe = hadProbe;
 check('Slow Gemini → aborted within budget → 502 retryable', status === 502 && slowMs < 2000, `${slowMs} ms`);
 delete process.env.GEMINI_TIMEOUT_MS;
+
+// 17) Slow upstream probe → light model first
+// Fresh module instance → empty probe cache, now against a slow upstream.
+({ default: handler } = await import(new URL(`../netlify/functions/companion.js?v=2-${Date.now()}`, import.meta.url).href));
+const order = [];
+PROBE_STATE.slowProbe = true;
+globalThis.fetch = async (url, options = {}) => {
+  if (String(url).includes('generativelanguage') && options?.method === 'GET') {
+    await new Promise((resolve, reject) => {
+      const t = setTimeout(resolve, 5000);
+      options?.signal?.addEventListener('abort', () => { clearTimeout(t); reject(Object.assign(new Error('aborted'), { name: 'AbortError' })); }, { once: true });
+    });
+  }
+  const body = JSON.parse(options.body || '{}');
+  order.push(body.model);
+  return new Response(JSON.stringify({ output_text: 'Lite answer.' }), { status: 200 });
+};
+({ status, data } = await call(conversation));
+check(
+  'Slow upstream probe → light model tried first',
+  status === 200 && order[0] === 'gemini-3.5-flash-lite',
+  order.join(' → '),
+);
+globalThis.fetch = realFetch;
 
 const failed = results.filter((r) => !r.pass);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

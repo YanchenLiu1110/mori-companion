@@ -12,6 +12,9 @@
 
 [functions]
   node_bundler = "esbuild"
+  # Gemini free-tier keys are not available in every region (e.g. Hong Kong).
+  # Pin the function to a US region unless the site is already deployed there.
+  # region = "us-east-1"
 
 # The React app uses hash routes (#/home), so a catch-all fallback is enough
 # for deep links. Keep it last so /assets and functions are never shadowed.

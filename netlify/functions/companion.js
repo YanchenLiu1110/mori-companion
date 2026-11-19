@@ -69,7 +69,7 @@ function buildInteractionRequest(body = {}, modelOverride) {
       system_instruction: String(body.systemPrompt || '').slice(0, 8000),
       generation_config: {
         max_output_tokens: 512,
-        thinking_level: DEFAULT_THINKING_LEVEL,
+        thinking_level: /lite/.test(model) ? 'minimal' : DEFAULT_THINKING_LEVEL,
       },
       store: false,
     },
@@ -147,6 +147,40 @@ function modelChain() {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Latency probe cache (per warm instance). A GET on the interactions API needs no
+// quota and is rejected/answered quickly, so it measures reachability + RTT.
+let preflight = null;
+
+async function probeUpstreamLatency(key) {
+  if (preflight) return preflight;
+  const started = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4_000);
+  try {
+    await fetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=1', {
+      method: 'GET',
+      headers: { 'x-goog-api-key': key },
+      signal: controller.signal,
+    });
+    preflight = Date.now() - started;
+  } catch {
+    preflight = 4_000;
+  } finally {
+    clearTimeout(timer);
+  }
+  return preflight;
+}
+
+/**
+ * Overloaded Flash models answer in a couple of seconds; a tiny model with a
+ * minimal-thinking budget is the safest bet when the upstream looks slow.
+ */
+function orderModelsForLatency(chain) {
+  if (preflight === null || preflight < 1_500) return chain;
+  const light = ['gemini-3.5-flash-lite', 'gemini-2.5-flash-lite'];
+  return [...light.filter((model) => !chain.includes(model)), ...chain];
+}
+
 async function callGemini({ key, model, payload, signal }) {
   const response = await fetch(INTERACTIONS_URL, {
     method: 'POST',
@@ -195,7 +229,7 @@ async function handle(request) {
   }
 
   // Stay well under Netlify's ~30s gateway timeout, and keep replies snappy.
-  const BUDGET_MS = Number(process.env.GEMINI_TIMEOUT_MS || 22_000);
+  const BUDGET_MS = Number(process.env.GEMINI_TIMEOUT_MS || 16_000);
   const startedAt = Date.now();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), BUDGET_MS);
@@ -203,8 +237,11 @@ async function handle(request) {
   let sawQuotaError = false;
 
   try {
+    // If we know the upstream is slow for this deployment, start with a lighter model.
+    preflight = await probeUpstreamLatency(keys[0]);
+    const ordered = orderModelsForLatency(modelChain());
     for (const key of keys) {
-      for (const model of modelChain()) {
+      for (const model of ordered) {
         const { payload } = buildInteractionRequest(body, model);
         const attempts = [0, 500]; // one try + one short back-off retry
         for (const delay of attempts) {
@@ -258,7 +295,12 @@ async function handle(request) {
   // Visible in Netlify → Functions → companion logs during a live demo.
   console.warn(
     '[MORI ai] gemini request failed',
-    JSON.stringify({ ...lastError, elapsed_ms: Date.now() - startedAt, budget_ms: BUDGET_MS }),
+    JSON.stringify({
+      ...lastError,
+      elapsed_ms: Date.now() - startedAt,
+      budget_ms: BUDGET_MS,
+      preflight_ms: preflight,
+    }),
   );
   // 4xx means the client should not retry; everything else maps to 502 so the
   // UI quietly falls back to mock replies instead of showing an error.
